@@ -23,7 +23,6 @@ from dlt.sources.helpers.rest_client.client import RESTClient
 from dlt.sources.helpers.rest_client.paginators import BasePaginator
 from dlt.sources.helpers.rest_client.typing import HTTPMethodBasic
 
-from posthog.temporal.data_imports.pipelines.helpers import is_job_cancelled
 from .typing import (
     ClientConfig,
     ResolvedParam,
@@ -259,9 +258,6 @@ def create_resources(
             ) -> AsyncGenerator[Iterator[Any], Any]:
                 yield dlt.mark.materialize_table_schema()  # type: ignore
 
-                if await is_job_cancelled(team_id=team_id, job_id=job_id):
-                    return
-
                 if incremental_object:
                     params = _set_incremental_params(
                         params,
@@ -314,9 +310,6 @@ def create_resources(
                 incremental_cursor_transform: Optional[Callable[..., Any]] = incremental_cursor_transform,
             ) -> AsyncGenerator[Any, Any]:
                 yield dlt.mark.materialize_table_schema()  # type: ignore
-
-                if await is_job_cancelled(team_id=team_id, job_id=job_id):
-                    return
 
                 if incremental_object:
                     params = _set_incremental_params(
@@ -379,22 +372,3 @@ def _set_incremental_params(
     if incremental_param.end:
         params[incremental_param.end] = transform(incremental_object.end_value)
     return params
-
-
-# XXX: This is a workaround pass test_dlt_init.py
-# since the source uses dlt.source as a function
-def _register_source(source_func: Callable[..., DltSource]) -> None:
-    import inspect
-    from dlt.common.configuration import get_fun_spec
-    from dlt.common.source import _SOURCES, SourceInfo
-
-    spec = get_fun_spec(source_func)
-    func_module = inspect.getmodule(source_func)
-    _SOURCES[source_func.__name__] = SourceInfo(
-        SPEC=spec,
-        f=source_func,
-        module=func_module,
-    )
-
-
-_register_source(rest_api_source)

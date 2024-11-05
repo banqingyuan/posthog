@@ -24,7 +24,7 @@ from .date import (
 )
 from .crypto import sha256Hex, md5Hex, sha256HmacChainHex
 from ..objects import is_hog_error, new_hog_error, is_hog_callable, is_hog_closure
-from ..utils import like
+from ..utils import like, get_nested_value
 
 if TYPE_CHECKING:
     from posthog.models import Team
@@ -100,6 +100,12 @@ def ifNull(args: list[Any], team: Optional["Team"], stdout: Optional[list[str]],
         return args[1]
 
 
+def empty(args: list[Any], team: Optional["Team"], stdout: Optional[list[str]], timeout: float):
+    if isinstance(args[0], bool) or isinstance(args[0], int) or isinstance(args[0], float):
+        return False
+    return not bool(args[0])
+
+
 def sleep(args: list[Any], team: Optional["Team"], stdout: Optional[list[str]], timeout: float):
     time.sleep(args[0])
     return None
@@ -152,6 +158,79 @@ def jsonStringify(args: list[Any], team: Optional["Team"], stdout: Optional[list
     if len(args) > 1 and isinstance(args[1], int) and args[1] > 0:
         return json.dumps(json_safe(args[0]), indent=args[1])
     return json.dumps(json_safe(args[0]))
+
+
+def JSONHas(args: list[Any], team: Optional["Team"], stdout: Optional[list[str]], timeout: float) -> bool:
+    obj = args[0]
+    path = args[1:]
+    current = obj
+    for key in path:
+        currentParsed = current
+        if isinstance(current, str):
+            try:
+                currentParsed = json.loads(current)
+            except json.JSONDecodeError:
+                return False
+        if isinstance(currentParsed, dict):
+            if key not in currentParsed:
+                return False
+            current = currentParsed[key]
+        elif isinstance(currentParsed, list):
+            if isinstance(key, int):
+                if key < 0:
+                    if key < -len(currentParsed):
+                        return False
+                    current = currentParsed[len(currentParsed) + key]
+                elif key == 0:
+                    return False
+                else:
+                    if key > len(currentParsed):
+                        return False
+                    current = currentParsed[key - 1]
+            else:
+                return False
+        else:
+            return False
+    return True
+
+
+def isValidJSON(args: list[Any], team: Optional["Team"], stdout: Optional[list[str]], timeout: float) -> bool:
+    try:
+        json.loads(args[0])
+        return True
+    except json.JSONDecodeError:
+        return False
+
+
+def JSONLength(args: list[Any], team: Optional["Team"], stdout: Optional[list[str]], timeout: float) -> int:
+    obj = args[0]
+    path = args[1:]
+    try:
+        if isinstance(obj, str):
+            obj = json.loads(obj)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(obj, dict) and not isinstance(obj, list):
+        return 0
+    current = get_nested_value(obj, path, nullish=True)
+    if isinstance(current, dict) or isinstance(current, list):
+        return len(current)
+    return 0
+
+
+def JSONExtractBool(args: list[Any], team: Optional["Team"], stdout: Optional[list[str]], timeout: float) -> bool:
+    obj = args[0]
+    path = args[1:]
+    try:
+        if isinstance(obj, str):
+            obj = json.loads(obj)
+    except json.JSONDecodeError:
+        return False
+    if len(path) > 0:
+        obj = get_nested_value(obj, path, nullish=True)
+    if isinstance(obj, bool):
+        return obj
+    return False
 
 
 def base64Encode(args: list[Any], team: Optional["Team"], stdout: Optional[list[str]], timeout: float) -> str:
@@ -367,8 +446,10 @@ STL: dict[str, STLFunction] = {
     "toFloat": STLFunction(fn=toFloat, minArgs=1, maxArgs=1),
     "ifNull": STLFunction(fn=ifNull, minArgs=2, maxArgs=2),
     "length": STLFunction(fn=lambda args, team, stdout, timeout: len(args[0]), minArgs=1, maxArgs=1),
-    "empty": STLFunction(fn=lambda args, team, stdout, timeout: not bool(args[0]), minArgs=1, maxArgs=1),
-    "notEmpty": STLFunction(fn=lambda args, team, stdout, timeout: bool(args[0]), minArgs=1, maxArgs=1),
+    "empty": STLFunction(fn=empty, minArgs=1, maxArgs=1),
+    "notEmpty": STLFunction(
+        fn=lambda args, team, stdout, timeout: not empty(args, team, stdout, timeout), minArgs=1, maxArgs=1
+    ),
     "tuple": STLFunction(fn=lambda args, team, stdout, timeout: tuple(args), minArgs=0, maxArgs=None),
     "lower": STLFunction(fn=lambda args, team, stdout, timeout: args[0].lower(), minArgs=1, maxArgs=1),
     "upper": STLFunction(fn=lambda args, team, stdout, timeout: args[0].upper(), minArgs=1, maxArgs=1),
@@ -376,6 +457,10 @@ STL: dict[str, STLFunction] = {
     "print": STLFunction(fn=print, minArgs=0, maxArgs=None),
     "jsonParse": STLFunction(fn=jsonParse, minArgs=1, maxArgs=1),
     "jsonStringify": STLFunction(fn=jsonStringify, minArgs=1, maxArgs=1),
+    "JSONHas": STLFunction(fn=JSONHas, minArgs=2, maxArgs=None),
+    "isValidJSON": STLFunction(fn=isValidJSON, minArgs=1, maxArgs=1),
+    "JSONLength": STLFunction(fn=JSONLength, minArgs=2, maxArgs=None),
+    "JSONExtractBool": STLFunction(fn=JSONExtractBool, minArgs=1, maxArgs=None),
     "base64Encode": STLFunction(fn=base64Encode, minArgs=1, maxArgs=1),
     "base64Decode": STLFunction(fn=base64Decode, minArgs=1, maxArgs=1),
     "encodeURLComponent": STLFunction(fn=encodeURLComponent, minArgs=1, maxArgs=1),
@@ -385,6 +470,20 @@ STL: dict[str, STLFunction] = {
     ),
     "replaceAll": STLFunction(
         fn=lambda args, team, stdout, timeout: args[0].replace(args[1], args[2]), minArgs=3, maxArgs=3
+    ),
+    "position": STLFunction(
+        fn=lambda args, team, stdout, timeout: (args[0].index(str(args[1])) + 1)
+        if isinstance(args[0], str) and str(args[1]) in args[0]
+        else 0,
+        minArgs=2,
+        maxArgs=2,
+    ),
+    "positionCaseInsensitive": STLFunction(
+        fn=lambda args, team, stdout, timeout: (args[0].lower().index(str(args[1]).lower()) + 1)
+        if isinstance(args[0], str) and str(args[1]).lower() in args[0].lower()
+        else 0,
+        minArgs=2,
+        maxArgs=2,
     ),
     "trim": STLFunction(fn=trim, minArgs=1, maxArgs=2),
     "trimLeft": STLFunction(fn=trimLeft, minArgs=1, maxArgs=2),
@@ -398,6 +497,13 @@ STL: dict[str, STLFunction] = {
     ),
     "keys": STLFunction(fn=keys, minArgs=1, maxArgs=1),
     "values": STLFunction(fn=values, minArgs=1, maxArgs=1),
+    "indexOf": STLFunction(
+        fn=lambda args, team, stdout, timeout: (args[0].index(args[1]) + 1)
+        if isinstance(args[0], list) and args[1] in args[0]
+        else 0,
+        minArgs=2,
+        maxArgs=2,
+    ),
     "arrayPushBack": STLFunction(fn=arrayPushBack, minArgs=2, maxArgs=2),
     "arrayPushFront": STLFunction(fn=arrayPushFront, minArgs=2, maxArgs=2),
     "arrayPopBack": STLFunction(fn=arrayPopBack, minArgs=1, maxArgs=1),

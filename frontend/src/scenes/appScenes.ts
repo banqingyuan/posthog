@@ -38,6 +38,7 @@ export const appScenes: Record<Scene, () => any> = {
     [Scene.Surveys]: () => import('./surveys/Surveys'),
     [Scene.Survey]: () => import('./surveys/Survey'),
     [Scene.SurveyTemplates]: () => import('./surveys/SurveyTemplates'),
+    [Scene.DataModel]: () => import('./data-model/DataModelScene'),
     [Scene.DataWarehouse]: () => import('./data-warehouse/external/DataWarehouseExternalScene'),
     [Scene.DataWarehouseTable]: () => import('./data-warehouse/new/NewSourceWizard'),
     [Scene.DataWarehouseExternal]: () => import('./data-warehouse/external/DataWarehouseExternalScene'),
@@ -45,6 +46,7 @@ export const appScenes: Record<Scene, () => any> = {
     [Scene.OrganizationCreateFirst]: () => import('./organization/Create'),
     [Scene.OrganizationCreationConfirm]: () => import('./organization/ConfirmOrganization/ConfirmOrganization'),
     [Scene.ProjectHomepage]: () => import('./project-homepage/ProjectHomepage'),
+    [Scene.Max]: () => import('./max/Max'),
     [Scene.ProjectCreateFirst]: () => import('./project/Create'),
     [Scene.SystemStatus]: () => import('./instance/SystemStatus'),
     [Scene.ToolbarLaunch]: () => import('./toolbar-launch/ToolbarLaunch'),
@@ -55,6 +57,7 @@ export const appScenes: Record<Scene, () => any> = {
     [Scene.Signup]: () => import('./authentication/signup/SignupContainer'),
     [Scene.InviteSignup]: () => import('./authentication/InviteSignup'),
     [Scene.Billing]: () => import('./billing/Billing'),
+    [Scene.BillingAuthorizationStatus]: () => import('./billing/AuthorizationStatus'),
     [Scene.Login]: () => import('./authentication/Login'),
     [Scene.Login2FA]: () => import('./authentication/Login2FA'),
     [Scene.SavedInsights]: () => import('./saved-insights/SavedInsights'),
@@ -74,4 +77,6 @@ export const appScenes: Record<Scene, () => any> = {
     [Scene.Heatmaps]: () => import('./heatmaps/HeatmapsScene'),
     [Scene.SessionAttributionExplorer]: () =>
         import('scenes/web-analytics/SessionAttributionExplorer/SessionAttributionExplorerScene'),
+    [Scene.MessagingProviders]: () => import('./messaging/Providers'),
+    [Scene.MessagingBroadcasts]: () => import('./messaging/Broadcasts'),
 }

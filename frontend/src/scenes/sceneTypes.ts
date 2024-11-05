@@ -43,16 +43,19 @@ export enum Scene {
     Survey = 'Survey',
     SurveyTemplates = 'SurveyTemplates',
     DataWarehouse = 'DataWarehouse',
+    DataModel = 'DataModel',
     DataWarehouseExternal = 'DataWarehouseExternal',
     DataWarehouseTable = 'DataWarehouseTable',
     DataWarehouseRedirect = 'DataWarehouseRedirect',
     OrganizationCreateFirst = 'OrganizationCreate',
     ProjectHomepage = 'ProjectHomepage',
+    Max = 'Max',
     ProjectCreateFirst = 'ProjectCreate',
     SystemStatus = 'SystemStatus',
     AsyncMigrations = 'AsyncMigrations',
     DeadLetterQueue = 'DeadLetterQueue',
     Billing = 'Billing',
+    BillingAuthorizationStatus = 'BillingAuthorizationStatus',
     SavedInsights = 'SavedInsights',
     ToolbarLaunch = 'ToolbarLaunch',
     Site = 'Site',
@@ -78,6 +81,8 @@ export enum Scene {
     MoveToPostHogCloud = 'MoveToPostHogCloud',
     Heatmaps = 'Heatmaps',
     SessionAttributionExplorer = 'SessionAttributionExplorer',
+    MessagingProviders = 'MessagingProviders',
+    MessagingBroadcasts = 'MessagingBroadcasts',
 }
 
 export type SceneProps = Record<string, any>
@@ -124,7 +129,7 @@ export interface SceneConfig {
      * If `plain`, there's no navigation present, and the scene has no padding.
      * @default 'app'
      */
-    layout?: 'app' | 'app-raw' | 'app-container' | 'plain'
+    layout?: 'app' | 'app-raw' | 'app-canvas' | 'app-container' | 'plain'
     /** Hides project notice (ProjectNotice.tsx). */
     hideProjectNotice?: boolean
     /** Hides billing notice (BillingAlertsV2.tsx). */

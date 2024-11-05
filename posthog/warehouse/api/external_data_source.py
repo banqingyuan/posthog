@@ -1,55 +1,79 @@
-from dateutil import parser
+import re
 import uuid
 from typing import Any
 
-from psycopg2 import OperationalError
-from sentry_sdk import capture_exception
 import structlog
+import temporalio
+from dateutil import parser
+from django.db.models import Prefetch
+from psycopg2 import OperationalError
 from rest_framework import filters, serializers, status, viewsets
-from posthog.api.utils import action
 from rest_framework.request import Request
 from rest_framework.response import Response
+from sentry_sdk import capture_exception
+from snowflake.connector.errors import DatabaseError, ForbiddenError, ProgrammingError
+from sshtunnel import BaseSSHTunnelForwarderError
 
 from posthog.api.routing import TeamAndOrgViewSetMixin
-from posthog.warehouse.data_load.service import (
-    sync_external_data_job_workflow,
-    delete_external_data_schedule,
-    cancel_external_data_workflow,
-    delete_data_import_folder,
-    is_any_external_data_schema_paused,
-    trigger_external_data_source_workflow,
-)
-from posthog.warehouse.models import ExternalDataSource, ExternalDataSchema, ExternalDataJob
-from posthog.warehouse.api.external_data_schema import ExternalDataSchemaSerializer, SimpleExternalDataSchemaSerializer
+from posthog.api.utils import action
+from posthog.cloud_utils import is_cloud
 from posthog.hogql.database.database import create_hogql_database
-from posthog.temporal.data_imports.pipelines.stripe import validate_credentials as validate_stripe_credentials
-from posthog.temporal.data_imports.pipelines.zendesk import validate_credentials as validate_zendesk_credentials
+from posthog.temporal.data_imports.pipelines.bigquery import (
+    filter_incremental_fields as filter_bigquery_incremental_fields,
+)
+from posthog.temporal.data_imports.pipelines.bigquery import (
+    get_schemas as get_bigquery_schemas,
+)
+from posthog.temporal.data_imports.pipelines.bigquery import (
+    validate_credentials as validate_bigquery_credentials,
+)
+from posthog.temporal.data_imports.pipelines.chargebee import (
+    validate_credentials as validate_chargebee_credentials,
+)
+from posthog.temporal.data_imports.pipelines.hubspot.auth import (
+    get_hubspot_access_token_from_code,
+)
 from posthog.temporal.data_imports.pipelines.schemas import (
     PIPELINE_TYPE_INCREMENTAL_ENDPOINTS_MAPPING,
     PIPELINE_TYPE_INCREMENTAL_FIELDS_MAPPING,
     PIPELINE_TYPE_SCHEMA_DEFAULT_MAPPING,
 )
-from posthog.temporal.data_imports.pipelines.hubspot.auth import (
-    get_hubspot_access_token_from_code,
+from posthog.temporal.data_imports.pipelines.stripe import (
+    validate_credentials as validate_stripe_credentials,
+)
+from posthog.temporal.data_imports.pipelines.vitally import (
+    validate_credentials as validate_vitally_credentials,
+)
+from posthog.temporal.data_imports.pipelines.zendesk import (
+    validate_credentials as validate_zendesk_credentials,
+)
+from posthog.utils import get_instance_region
+from posthog.warehouse.api.external_data_schema import (
+    ExternalDataSchemaSerializer,
+    SimpleExternalDataSchemaSerializer,
+)
+from posthog.warehouse.data_load.service import (
+    cancel_external_data_workflow,
+    delete_data_import_folder,
+    delete_external_data_schedule,
+    is_any_external_data_schema_paused,
+    sync_external_data_job_workflow,
+    trigger_external_data_source_workflow,
+)
+from posthog.warehouse.models import (
+    ExternalDataJob,
+    ExternalDataSchema,
+    ExternalDataSource,
 )
 from posthog.warehouse.models.external_data_schema import (
     filter_mssql_incremental_fields,
     filter_mysql_incremental_fields,
     filter_postgres_incremental_fields,
     filter_snowflake_incremental_fields,
-    get_sql_schemas_for_source_type,
     get_snowflake_schemas,
+    get_sql_schemas_for_source_type,
 )
-
-import temporalio
-
-from posthog.cloud_utils import is_cloud
-from posthog.utils import get_instance_region
 from posthog.warehouse.models.ssh_tunnel import SSHTunnel
-from sshtunnel import BaseSSHTunnelForwarderError
-from snowflake.connector.errors import ProgrammingError, DatabaseError, ForbiddenError
-from django.db.models import Prefetch
-
 
 logger = structlog.get_logger(__name__)
 
@@ -89,6 +113,7 @@ MSSQLErrors = {
 
 class ExternalDataJobSerializers(serializers.ModelSerializer):
     schema = serializers.SerializerMethodField(read_only=True)
+    status = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = ExternalDataJob
@@ -112,6 +137,12 @@ class ExternalDataJobSerializers(serializers.ModelSerializer):
             "latest_error",
             "workflow_run_id",
         ]
+
+    def get_status(self, instance: ExternalDataJob):
+        if instance.status == ExternalDataJob.Status.CANCELLED:
+            return "Billing limits"
+
+        return instance.status
 
     def get_schema(self, instance: ExternalDataJob):
         return SimpleExternalDataSchemaSerializer(
@@ -139,6 +170,7 @@ class ExternalDataSourceSerializers(serializers.ModelSerializer):
             "prefix",
             "last_run_at",
             "schemas",
+            "job_inputs",
         ]
         read_only_fields = [
             "id",
@@ -150,6 +182,9 @@ class ExternalDataSourceSerializers(serializers.ModelSerializer):
             "schemas",
             "prefix",
         ]
+        extra_kwargs = {
+            "job_inputs": {"write_only": True},
+        }
 
     def get_last_run_at(self, instance: ExternalDataSource) -> str:
         latest_completed_run = instance.ordered_jobs[0] if instance.ordered_jobs else None  # type: ignore
@@ -167,7 +202,7 @@ class ExternalDataSourceSerializers(serializers.ModelSerializer):
         if any_failures:
             return ExternalDataSchema.Status.ERROR
         elif any_cancelled:
-            return ExternalDataSchema.Status.CANCELLED
+            return "Billing limits"
         elif any_paused:
             return ExternalDataSchema.Status.PAUSED
         elif any_running:
@@ -273,6 +308,8 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             new_source_model = self._handle_zendesk_source(request, *args, **kwargs)
         elif source_type == ExternalDataSource.Type.SALESFORCE:
             new_source_model = self._handle_salesforce_source(request, *args, **kwargs)
+        elif source_type == ExternalDataSource.Type.VITALLY:
+            new_source_model = self._handle_vitally_source(request, *args, **kwargs)
         elif source_type in [
             ExternalDataSource.Type.POSTGRES,
             ExternalDataSource.Type.MYSQL,
@@ -288,6 +325,10 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
                 raise
         elif source_type == ExternalDataSource.Type.SNOWFLAKE:
             new_source_model, snowflake_schemas = self._handle_snowflake_source(request, *args, **kwargs)
+        elif source_type == ExternalDataSource.Type.BIGQUERY:
+            new_source_model, bigquery_schemas = self._handle_bigquery_source(request, *args, **kwargs)
+        elif source_type == ExternalDataSource.Type.CHARGEBEE:
+            new_source_model = self._handle_chargebee_source(request, *args, **kwargs)
         else:
             raise NotImplementedError(f"Source type {source_type} not implemented")
 
@@ -301,6 +342,8 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             default_schemas = sql_schemas
         elif source_type == ExternalDataSource.Type.SNOWFLAKE:
             default_schemas = snowflake_schemas
+        elif source_type == ExternalDataSource.Type.BIGQUERY:
+            default_schemas = bigquery_schemas
         else:
             default_schemas = list(PIPELINE_TYPE_SCHEMA_DEFAULT_MAPPING[source_type])
 
@@ -383,6 +426,48 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             status="Running",
             source_type=source_type,
             job_inputs={"stripe_secret_key": client_secret, "stripe_account_id": account_id},
+            prefix=prefix,
+        )
+
+        return new_source_model
+
+    def _handle_vitally_source(self, request: Request, *args: Any, **kwargs: Any) -> ExternalDataSource:
+        payload = request.data["payload"]
+        secret_token = payload.get("secret_token")
+        region = payload.get("region")
+        subdomain = payload.get("subdomain", None)
+        prefix = request.data.get("prefix", None)
+        source_type = request.data["source_type"]
+
+        # TODO: remove dummy vars
+        new_source_model = ExternalDataSource.objects.create(
+            source_id=str(uuid.uuid4()),
+            connection_id=str(uuid.uuid4()),
+            destination_id=str(uuid.uuid4()),
+            team=self.team,
+            status="Running",
+            source_type=source_type,
+            job_inputs={"secret_token": secret_token, "region": region, "subdomain": subdomain},
+            prefix=prefix,
+        )
+
+        return new_source_model
+
+    def _handle_chargebee_source(self, request: Request, *args: Any, **kwargs: Any) -> ExternalDataSource:
+        payload = request.data["payload"]
+        api_key = payload.get("api_key")
+        site_name = payload.get("site_name")
+        prefix = request.data.get("prefix", None)
+        source_type = request.data["source_type"]
+
+        new_source_model = ExternalDataSource.objects.create(
+            source_id=str(uuid.uuid4()),
+            connection_id=str(uuid.uuid4()),
+            destination_id=str(uuid.uuid4()),
+            team=self.team,
+            status="Running",
+            source_type=source_type,
+            job_inputs={"api_key": api_key, "site_name": site_name},
             prefix=prefix,
         )
 
@@ -537,7 +622,7 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             ssh_tunnel,
         )
 
-        return new_source_model, schemas
+        return new_source_model, list(schemas.keys())
 
     def _handle_snowflake_source(
         self, request: Request, *args: Any, **kwargs: Any
@@ -575,7 +660,51 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
 
         schemas = get_snowflake_schemas(account_id, database, warehouse, user, password, schema, role)
 
-        return new_source_model, schemas
+        return new_source_model, list(schemas.keys())
+
+    def _handle_bigquery_source(
+        self, request: Request, *args: Any, **kwargs: Any
+    ) -> tuple[ExternalDataSource, list[Any]]:
+        payload = request.data["payload"]
+        prefix = request.data.get("prefix", None)
+        source_type = request.data["source_type"]
+
+        dataset_id = payload.get("dataset_id")
+        key_file = payload.get("key_file", {})
+        project_id = key_file.get("project_id")
+        private_key = key_file.get("private_key")
+        private_key_id = key_file.get("private_key_id")
+        client_email = key_file.get("client_email")
+        token_uri = key_file.get("token_uri")
+
+        new_source_model = ExternalDataSource.objects.create(
+            source_id=str(uuid.uuid4()),
+            connection_id=str(uuid.uuid4()),
+            destination_id=str(uuid.uuid4()),
+            team=self.team,
+            status="Running",
+            source_type=source_type,
+            job_inputs={
+                "dataset_id": dataset_id,
+                "project_id": project_id,
+                "private_key": private_key,
+                "private_key_id": private_key_id,
+                "client_email": client_email,
+                "token_uri": token_uri,
+            },
+            prefix=prefix,
+        )
+
+        schemas = get_bigquery_schemas(
+            dataset_id=dataset_id,
+            project_id=project_id,
+            private_key=private_key,
+            private_key_id=private_key_id,
+            client_email=client_email,
+            token_uri=token_uri,
+        )
+
+        return new_source_model, list(schemas.keys())
 
     def prefix_required(self, source_type: str) -> bool:
         source_type_exists = (
@@ -604,21 +733,16 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         if latest_running_job and latest_running_job.workflow_id and latest_running_job.status == "Running":
             cancel_external_data_workflow(latest_running_job.workflow_id)
 
-        all_jobs = ExternalDataJob.objects.filter(
-            pipeline_id=instance.pk, team_id=instance.team_id, status="Completed"
-        ).all()
-        for job in all_jobs:
-            try:
-                delete_data_import_folder(job.folder_path())
-            except Exception as e:
-                logger.exception(f"Could not clean up data import folder: {job.folder_path()}", exc_info=e)
-                pass
-
         for schema in (
             ExternalDataSchema.objects.exclude(deleted=True)
             .filter(team_id=self.team_id, source_id=instance.id, should_sync=True)
             .all()
         ):
+            try:
+                delete_data_import_folder(schema.folder_path())
+            except Exception as e:
+                logger.exception(f"Could not clean up data import folder: {schema.folder_path()}", exc_info=e)
+                pass
             delete_external_data_schedule(str(schema.id))
 
         delete_external_data_schedule(str(instance.id))
@@ -678,10 +802,96 @@ class ExternalDataSourceViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             subdomain = request.data.get("subdomain", "")
             api_key = request.data.get("api_key", "")
             email_address = request.data.get("email_address", "")
+
+            subdomain_regex = re.compile("^[a-zA-Z-]+$")
+            if not subdomain_regex.match(subdomain):
+                return Response(
+                    status=status.HTTP_400_BAD_REQUEST,
+                    data={"message": "Invalid credentials: Zendesk subdomain is incorrect"},
+                )
+
             if not validate_zendesk_credentials(subdomain=subdomain, api_key=api_key, email_address=email_address):
                 return Response(
                     status=status.HTTP_400_BAD_REQUEST,
                     data={"message": "Invalid credentials: Zendesk credentials are incorrect"},
+                )
+        elif source_type == ExternalDataSource.Type.VITALLY:
+            secret_token = request.data.get("secret_token", "")
+            region = request.data.get("region", "")
+            subdomain = request.data.get("subdomain", "")
+
+            subdomain_regex = re.compile("^[a-zA-Z-]+$")
+            if not subdomain_regex.match(subdomain):
+                return Response(
+                    status=status.HTTP_400_BAD_REQUEST,
+                    data={"message": "Invalid credentials: Vitally subdomain is incorrect"},
+                )
+
+            if not validate_vitally_credentials(subdomain=subdomain, secret_token=secret_token, region=region):
+                return Response(
+                    status=status.HTTP_400_BAD_REQUEST,
+                    data={"message": "Invalid credentials: Vitally credentials are incorrect"},
+                )
+        elif source_type == ExternalDataSource.Type.BIGQUERY:
+            dataset_id = request.data.get("dataset_id", "")
+            key_file = request.data.get("key_file", {})
+            if not validate_bigquery_credentials(dataset_id=dataset_id, key_file=key_file):
+                return Response(
+                    status=status.HTTP_400_BAD_REQUEST,
+                    data={"message": "Invalid credentials: BigQuery credentials are incorrect"},
+                )
+
+            project_id = key_file.get("project_id")
+            private_key = key_file.get("private_key")
+            private_key_id = key_file.get("private_key_id")
+            client_email = key_file.get("client_email")
+            token_uri = key_file.get("token_uri")
+
+            bq_schemas = get_bigquery_schemas(
+                dataset_id=dataset_id,
+                project_id=project_id,
+                private_key=private_key,
+                private_key_id=private_key_id,
+                client_email=client_email,
+                token_uri=token_uri,
+            )
+
+            filtered_results = [
+                (table_name, filter_bigquery_incremental_fields(columns)) for table_name, columns in bq_schemas.items()
+            ]
+
+            result_mapped_to_options = [
+                {
+                    "table": table_name,
+                    "should_sync": False,
+                    "incremental_fields": [
+                        {"label": column_name, "type": column_type, "field": column_name, "field_type": column_type}
+                        for column_name, column_type in columns
+                    ],
+                    "incremental_available": True,
+                    "incremental_field": columns[0][0] if len(columns) > 0 and len(columns[0]) > 0 else None,
+                    "sync_type": None,
+                }
+                for table_name, columns in filtered_results
+            ]
+
+            return Response(status=status.HTTP_200_OK, data=result_mapped_to_options)
+        elif source_type == ExternalDataSource.Type.CHARGEBEE:
+            api_key = request.data.get("api_key", "")
+            site_name = request.data.get("site_name", "")
+
+            # Chargebee uses the term 'site' but it is effectively the subdomain
+            subdomain_regex = re.compile("^[a-zA-Z-]+$")
+            if not subdomain_regex.match(site_name):
+                return Response(
+                    status=status.HTTP_400_BAD_REQUEST,
+                    data={"message": "Invalid credentials: Chargebee site name is incorrect"},
+                )
+
+            if not validate_chargebee_credentials(api_key=api_key, site_name=site_name):
+                return Response(
+                    status=status.HTTP_400_BAD_REQUEST,
+                    data={"message": "Invalid credentials: Chargebee credentials are incorrect"},
                 )
 
         # Get schemas and validate SQL credentials

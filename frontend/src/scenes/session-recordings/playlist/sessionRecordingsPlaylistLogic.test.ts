@@ -1,5 +1,6 @@
 import { router } from 'kea-router'
 import { expectLogic } from 'kea-test-utils'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 
 import { useMocks } from '~/mocks/jest'
 import { initKeaTests } from '~/test/init'
@@ -15,14 +16,33 @@ import {
 
 describe('sessionRecordingsPlaylistLogic', () => {
     let logic: ReturnType<typeof sessionRecordingsPlaylistLogic.build>
-    const aRecording = { id: 'abc', viewed: false, recording_duration: 10, console_error_count: 50 }
-    const bRecording = { id: 'def', viewed: false, recording_duration: 10, console_error_count: 100 }
+    const aRecording = {
+        id: 'abc',
+        viewed: false,
+        recording_duration: 10,
+        start_time: '2023-10-12T16:55:36.404000Z',
+        console_error_count: 50,
+    }
+    const bRecording = {
+        id: 'def',
+        viewed: false,
+        recording_duration: 10,
+        start_time: '2023-05-12T16:55:36.404000Z',
+        console_error_count: 100,
+    }
     const listOfSessionRecordings = [aRecording, bRecording]
+    const offsetRecording = {
+        id: `recording_offset_by_${listOfSessionRecordings.length}`,
+        viewed: false,
+        recording_duration: 10,
+        start_time: '2023-08-12T16:55:36.404000Z',
+        console_error_count: 75,
+    }
 
     beforeEach(() => {
         useMocks({
             get: {
-                '/api/projects/:team/session_recordings/properties': {
+                '/api/environments/:team_id/session_recordings/properties': {
                     results: [
                         { id: 's1', properties: { blah: 'blah1' } },
                         { id: 's2', properties: { blah: 'blah2' } },
@@ -31,7 +51,7 @@ describe('sessionRecordingsPlaylistLogic', () => {
 
                 'api/projects/:team/property_definitions/seen_together': { $pageview: true },
 
-                '/api/projects/:team/session_recordings': (req) => {
+                '/api/environments/:team_id/session_recordings': (req) => {
                     const { searchParams } = req.url
                     if (
                         (searchParams.get('events')?.length || 0) > 0 &&
@@ -54,7 +74,7 @@ describe('sessionRecordingsPlaylistLogic', () => {
                         return [
                             200,
                             {
-                                results: [`List of recordings offset by ${listOfSessionRecordings.length}`],
+                                results: [offsetRecording],
                             },
                         ]
                     } else if (
@@ -96,6 +116,11 @@ describe('sessionRecordingsPlaylistLogic', () => {
             },
         })
         initKeaTests()
+        featureFlagLogic.mount()
+    })
+
+    afterEach(() => {
+        localStorage.clear()
     })
 
     describe('global logic', () => {
@@ -167,33 +192,39 @@ describe('sessionRecordingsPlaylistLogic', () => {
         })
 
         describe('ordering', () => {
+            afterEach(() => {
+                logic.actions.setFilters({ order: 'start_time' })
+                logic.actions.loadSessionRecordings()
+            })
+
             it('is set by setOrderBy, loads filtered results and orders the non pinned recordings', async () => {
                 await expectLogic(logic, () => {
-                    logic.actions.setOrderBy('console_error_count')
+                    logic.actions.setFilters({ order: 'console_error_count' })
                 })
-                    .toDispatchActions(['setOrderBy', 'loadSessionRecordings', 'loadSessionRecordingsSuccess'])
+                    .toDispatchActions(['loadSessionRecordings', 'loadSessionRecordingsSuccess'])
                     .toMatchValues({
-                        orderBy: 'console_error_count',
+                        filters: expect.objectContaining({ order: 'console_error_count' }),
                     })
 
                 expect(logic.values.otherRecordings.map((r) => r.console_error_count)).toEqual([100, 50])
             })
 
-            it('adds an offset when not using latest ordering', async () => {
+            it('adds an offset', async () => {
                 await expectLogic(logic, () => {
-                    logic.actions.setOrderBy('console_error_count')
+                    logic.actions.loadSessionRecordings()
                 })
-                    .toDispatchActionsInAnyOrder(['loadSessionRecordingsSuccess'])
+                    .toDispatchActions(['loadSessionRecordingsSuccess'])
                     .toMatchValues({
                         sessionRecordings: listOfSessionRecordings,
                     })
 
                 await expectLogic(logic, () => {
-                    logic.actions.maybeLoadSessionRecordings('newer')
+                    logic.actions.loadSessionRecordings('older')
                 })
                     .toDispatchActions(['loadSessionRecordingsSuccess'])
                     .toMatchValues({
-                        sessionRecordings: [...listOfSessionRecordings, 'List of recordings offset by 2'],
+                        // reorganises recordings based on start_time
+                        sessionRecordings: [aRecording, offsetRecording, bRecording],
                     })
             })
         })
@@ -306,6 +337,7 @@ describe('sessionRecordingsPlaylistLogic', () => {
                 expect(router.values.searchParams.filters).toHaveProperty('date_to', '2021-10-20')
             })
         })
+
         describe('duration filter', () => {
             it('is set by setFilters and fetches results from server and sets the url', async () => {
                 await expectLogic(logic, () => {
@@ -370,8 +402,9 @@ describe('sessionRecordingsPlaylistLogic', () => {
                     .toFinishAllListeners()
                     .toMatchValues({
                         sessionRecordingsResponse: {
-                            results: listOfSessionRecordings,
+                            order: 'start_time',
                             has_next: undefined,
+                            results: listOfSessionRecordings,
                         },
                         sessionRecordings: listOfSessionRecordings,
                     })
@@ -382,6 +415,8 @@ describe('sessionRecordingsPlaylistLogic', () => {
                     .toFinishAllListeners()
                     .toMatchValues({
                         sessionRecordingsResponse: {
+                            has_next: undefined,
+                            order: 'start_time',
                             results: [
                                 {
                                     ...aRecording,
@@ -464,6 +499,7 @@ describe('sessionRecordingsPlaylistLogic', () => {
                             ],
                         },
                         filter_test_accounts: false,
+                        order: 'start_time',
                     },
                 })
         })
@@ -489,7 +525,7 @@ describe('sessionRecordingsPlaylistLogic', () => {
                     filters: {
                         date_from: '-3d',
                         date_to: null,
-                        duration: [{ key: 'duration', operator: 'gt', type: 'recording', value: 1 }],
+                        duration: [{ key: 'active_seconds', operator: 'gt', type: 'recording', value: 5 }],
                         filter_group: {
                             type: FilterLogicalOperator.And,
                             values: [
@@ -500,6 +536,7 @@ describe('sessionRecordingsPlaylistLogic', () => {
                             ],
                         },
                         filter_test_accounts: false,
+                        order: 'start_time',
                     },
                 })
         })
@@ -730,18 +767,43 @@ describe('sessionRecordingsPlaylistLogic', () => {
                         },
                     ],
                 },
+                order: 'console_error_count',
             })
 
-            expect(result.events).toEqual([
-                {
-                    id: '$pageview',
-                    name: '$pageview',
-                    properties: [
-                        { key: '$current_url', operator: 'exact', type: 'event', value: ['https://example-url.com'] },
-                    ],
-                    type: 'events',
-                },
-            ])
+            expect(result).toEqual({
+                actions: [],
+                console_log_filters: [],
+                date_from: '-3d',
+                date_to: null,
+                events: [
+                    {
+                        id: '$pageview',
+                        name: '$pageview',
+                        properties: [
+                            {
+                                key: '$current_url',
+                                operator: 'exact',
+                                type: 'event',
+                                value: ['https://example-url.com'],
+                            },
+                        ],
+                        type: 'events',
+                    },
+                ],
+                filter_test_accounts: false,
+                having_predicates: [
+                    {
+                        key: 'active_seconds',
+                        operator: 'gt',
+                        type: 'recording',
+                        value: 5,
+                    },
+                ],
+                kind: 'RecordingsQuery',
+                operand: 'AND',
+                order: 'console_error_count',
+                properties: [],
+            })
         })
     })
 
@@ -753,10 +815,10 @@ describe('sessionRecordingsPlaylistLogic', () => {
                 date_to: null,
                 duration: [
                     {
-                        key: 'duration',
+                        key: 'active_seconds',
                         operator: 'gt',
                         type: 'recording',
-                        value: 1,
+                        value: 5,
                     },
                 ],
                 filter_group: {
@@ -769,6 +831,7 @@ describe('sessionRecordingsPlaylistLogic', () => {
                     ],
                 },
                 filter_test_accounts: false,
+                order: 'start_time',
             })
         })
         it('should parse even the most complex queries', () => {
@@ -827,6 +890,7 @@ describe('sessionRecordingsPlaylistLogic', () => {
                     ],
                 },
                 filter_test_accounts: true,
+                order: 'start_time',
             })
         })
     })

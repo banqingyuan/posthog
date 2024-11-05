@@ -1,4 +1,4 @@
-import { actions, afterMount, connect, kea, listeners, path, props, reducers, selectors } from 'kea'
+import { actions, connect, kea, key, listeners, path, props, reducers, selectors } from 'kea'
 import { loaders } from 'kea-loaders'
 import { actionToUrl, router, urlToAction } from 'kea-router'
 import api from 'lib/api'
@@ -37,14 +37,16 @@ export enum ErrorGroupTab {
 export const errorTrackingGroupSceneLogic = kea<errorTrackingGroupSceneLogicType>([
     path((key) => ['scenes', 'error-tracking', 'errorTrackingGroupSceneLogic', key]),
     props({} as ErrorTrackingGroupSceneLogicProps),
+    key((props) => JSON.stringify(props.fingerprint)),
 
     connect({
-        values: [errorTrackingLogic, ['dateRange', 'filterTestAccounts', 'filterGroup']],
+        values: [errorTrackingLogic, ['dateRange', 'filterTestAccounts', 'filterGroup', 'hasGroupActions']],
     }),
 
     actions({
         setErrorGroupTab: (tab: ErrorGroupTab) => ({ tab }),
         setActiveEventUUID: (uuid: ErrorTrackingEvent['uuid']) => ({ uuid }),
+        updateGroup: (group: Partial<Pick<ErrorTrackingGroup, 'assignee' | 'status'>>) => ({ group }),
     }),
 
     reducers(() => ({
@@ -73,12 +75,19 @@ export const errorTrackingGroupSceneLogic = kea<errorTrackingGroupSceneLogicType
                             dateRange: values.dateRange,
                             filterTestAccounts: values.filterTestAccounts,
                             filterGroup: values.filterGroup,
-                        })
+                        }),
+                        {},
+                        undefined,
+                        true
                     )
 
                     // ErrorTrackingQuery returns a list of groups
                     // when a fingerprint is supplied there will only be a single group
                     return response.results[0]
+                },
+                updateGroup: async ({ group }) => {
+                    const response = await api.errorTracking.update(props.fingerprint, group)
+                    return { ...values.group, ...response }
                 },
             },
         ],
@@ -166,8 +175,4 @@ export const errorTrackingGroupSceneLogic = kea<errorTrackingGroupSceneLogicType
             }
         },
     })),
-
-    afterMount(({ actions }) => {
-        actions.loadGroup()
-    }),
 ])

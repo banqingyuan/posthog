@@ -18,7 +18,9 @@ import { Kafka } from 'kafkajs'
 import { DateTime } from 'luxon'
 import { VM } from 'vm2'
 
+import { EncryptedFields } from './cdp/encryption-utils'
 import { ObjectStorage } from './main/services/object_storage'
+import { Celery } from './utils/db/celery'
 import { DB } from './utils/db/db'
 import { KafkaProducerWrapper } from './utils/db/kafka-producer-wrapper'
 import { PostgresRouter } from './utils/db/postgres'
@@ -83,7 +85,6 @@ export enum PluginServerMode {
     recordings_blob_ingestion_overflow = 'recordings-blob-ingestion-overflow',
     cdp_processed_events = 'cdp-processed-events',
     cdp_function_callbacks = 'cdp-function-callbacks',
-    cdp_function_overflow = 'cdp-function-overflow',
     cdp_cyclotron_worker = 'cdp-cyclotron-worker',
     functional_tests = 'functional-tests',
 }
@@ -114,10 +115,14 @@ export type CdpConfig = {
     CDP_WATCHER_DISABLED_TEMPORARY_TTL: number // How long a function should be temporarily disabled for
     CDP_WATCHER_DISABLED_TEMPORARY_MAX_COUNT: number // How many times a function can be disabled before it is disabled permanently
     CDP_ASYNC_FUNCTIONS_RUSTY_HOOK_TEAMS: string
-    CDP_ASYNC_FUNCTIONS_CYCLOTRON_TEAMS: string
+    CDP_HOG_FILTERS_TELEMETRY_TEAMS: string
+    CDP_CYCLOTRON_ENABLED_TEAMS: string
+    CDP_CYCLOTRON_BATCH_SIZE: number
+    CDP_CYCLOTRON_BATCH_DELAY_MS: number
     CDP_REDIS_HOST: string
     CDP_REDIS_PORT: number
     CDP_REDIS_PASSWORD: string
+    CDP_EVENT_PROCESSOR_EXECUTE_FIRST_STEP: boolean
 }
 
 export interface PluginsServerConfig extends CdpConfig {
@@ -146,12 +151,19 @@ export interface PluginsServerConfig extends CdpConfig {
     CLICKHOUSE_SECURE: boolean // whether to secure ClickHouse connection
     CLICKHOUSE_DISABLE_EXTERNAL_SCHEMAS: boolean // whether to disallow external schemas like protobuf for clickhouse kafka engine
     CLICKHOUSE_DISABLE_EXTERNAL_SCHEMAS_TEAMS: string // (advanced) a comma separated list of teams to disable clickhouse external schemas for
-    CLICKHOUSE_JSON_EVENTS_KAFKA_TOPIC: string // (advanced) topic to send events to for clickhouse ingestion
-    CLICKHOUSE_HEATMAPS_KAFKA_TOPIC: string // (advanced) topic to send heatmap data to for clickhouse ingestion
+    CLICKHOUSE_JSON_EVENTS_KAFKA_TOPIC: string // (advanced) topic to send events for clickhouse ingestion
+    CLICKHOUSE_HEATMAPS_KAFKA_TOPIC: string // (advanced) topic to send heatmap data for clickhouse ingestion
+    EXCEPTIONS_SYMBOLIFICATION_KAFKA_TOPIC: string // (advanced) topic to send exception event data for stack trace processing
+    // Redis url pretty much only used locally / self hosted
     REDIS_URL: string
+    // Redis params for the ingestion services
+    INGESTION_REDIS_HOST: string
+    INGESTION_REDIS_PORT: number
+    // Redis params for the core posthog (django+celery) services
     POSTHOG_REDIS_PASSWORD: string
     POSTHOG_REDIS_HOST: string
     POSTHOG_REDIS_PORT: number
+    // Common redis params
     REDIS_POOL_MIN_SIZE: number // minimum number of Redis connections to use per thread
     REDIS_POOL_MAX_SIZE: number // maximum number of Redis connections to use per thread
     KAFKA_HOSTS: string // comma-delimited Kafka hosts
@@ -284,7 +296,10 @@ export interface PluginsServerConfig extends CdpConfig {
     // kafka debug stats interval
     SESSION_RECORDING_KAFKA_CONSUMPTION_STATISTICS_EVENT_INTERVAL_MS: number
 
+    ENCRYPTION_SALT_KEYS: string
+
     CYCLOTRON_DATABASE_URL: string
+    CYCLOTRON_SHARD_DEPTH_LIMIT: number
 }
 
 export interface Hub extends PluginsServerConfig {
@@ -317,6 +332,7 @@ export interface Hub extends PluginsServerConfig {
     appMetrics: AppMetrics
     rustyHook: RustyHook
     groupTypeManager: GroupTypeManager
+    celery: Celery
     // geoip database, setup in workers
     mmdb?: ReaderModel
     // functions
@@ -325,6 +341,7 @@ export interface Hub extends PluginsServerConfig {
     pluginConfigsToSkipElementsParsing: ValueMatcher<number>
     // lookups
     eventsToDropByToken: Map<string, string[]>
+    encryptedFields: EncryptedFields
 }
 
 export interface PluginServerCapabilities {
@@ -342,7 +359,6 @@ export interface PluginServerCapabilities {
     sessionRecordingBlobOverflowIngestion?: boolean
     cdpProcessedEvents?: boolean
     cdpFunctionCallbacks?: boolean
-    cdpFunctionOverflow?: boolean
     cdpCyclotronWorker?: boolean
     appManagementSingleton?: boolean
     preflightSchedules?: boolean // Used for instance health checks on hobby deploy, not useful on cloud
@@ -604,6 +620,7 @@ export interface RawOrganization {
 /** Usable Team model. */
 export interface Team {
     id: number
+    project_id: number
     uuid: string
     organization_id: string
     name: string
@@ -611,6 +628,7 @@ export interface Team {
     api_token: string
     slack_incoming_webhook: string | null
     session_recording_opt_in: boolean
+    person_processing_opt_out?: boolean
     heatmaps_opt_in: boolean | null
     ingested_event: boolean
     person_display_name_properties: string[] | null
@@ -686,6 +704,14 @@ export interface RawClickHouseEvent extends BaseEvent {
     person_mode: PersonMode
 }
 
+export interface RawKafkaEvent extends RawClickHouseEvent {
+    /**
+     * The project ID field is only included in the `clickhouse_events_json` topic, not present in ClickHouse.
+     * That's because we need it in `property-defs-rs` and not elsewhere.
+     */
+    project_id: number
+}
+
 /** Parsed event row from ClickHouse. */
 export interface ClickHouseEvent extends BaseEvent {
     timestamp: DateTime
@@ -714,6 +740,7 @@ export interface PreIngestionEvent {
     eventUuid: string
     event: string
     teamId: TeamId
+    projectId: TeamId
     distinctId: string
     properties: Properties
     timestamp: ISOTimestamp
@@ -1213,6 +1240,14 @@ export type AppMetric2Type = {
     app_source_id: string
     instance_id?: string
     metric_kind: 'failure' | 'success' | 'other'
-    metric_name: 'succeeded' | 'failed' | 'filtered' | 'disabled_temporarily' | 'disabled_permanently' | 'masked'
+    metric_name:
+        | 'succeeded'
+        | 'failed'
+        | 'filtered'
+        | 'disabled_temporarily'
+        | 'disabled_permanently'
+        | 'masked'
+        | 'filtering_failed'
+        | 'fetch'
     count: number
 }

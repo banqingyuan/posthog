@@ -22,10 +22,11 @@ from .utils import UUIDClassicModel, generate_random_token, sane_repr
 
 class Notifications(TypedDict, total=False):
     plugin_disabled: bool
-    batch_export_run_failure: bool
 
 
-NOTIFICATION_DEFAULTS: Notifications = {"plugin_disabled": True, "batch_export_run_failure": True}
+NOTIFICATION_DEFAULTS: Notifications = {
+    "plugin_disabled": True  # Catch all for any Pipeline destination issue (plugins, hog functions, batch exports)
+}
 
 # We don't ned the following attributes in most cases, so we defer them by default
 DEFERED_ATTRS = ["requested_password_reset_at"]
@@ -80,7 +81,9 @@ class UserManager(BaseUserManager):
             if create_team:
                 team = create_team(organization, user)
             else:
-                team = Team.objects.create_with_data(user=user, organization=organization, **(team_fields or {}))
+                team = Team.objects.create_with_data(
+                    initiating_user=user, organization=organization, **(team_fields or {})
+                )
             user.join(organization=organization, level=OrganizationMembership.Level.OWNER)
             return organization, team, user
 
@@ -146,6 +149,11 @@ class User(AbstractUser, UUIDClassicModel):
     requested_password_reset_at = models.DateTimeField(null=True, blank=True)
     has_seen_product_intro_for = models.JSONField(null=True, blank=True)
     strapi_id = models.PositiveSmallIntegerField(null=True, blank=True)
+    is_active = models.BooleanField(
+        _("active"),
+        default=True,
+        help_text=_("Unselect this to temporarily disable an account."),
+    )
 
     # Preferences / configuration options
 

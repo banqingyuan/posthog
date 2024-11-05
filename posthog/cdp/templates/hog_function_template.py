@@ -26,11 +26,13 @@ class HogFunctionSubTemplate:
 @dataclasses.dataclass(frozen=True)
 class HogFunctionTemplate:
     status: Literal["alpha", "beta", "stable", "free"]
+    type: Literal["destination", "shared", "email", "sms", "push", "broadcast", "activity", "alert"]
     id: str
     name: str
     description: str
     hog: str
     inputs_schema: list[dict]
+    category: list[str]
     sub_templates: Optional[list[HogFunctionSubTemplate]] = None
     filters: Optional[dict] = None
     masking: Optional[dict] = None

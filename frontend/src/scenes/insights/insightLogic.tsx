@@ -21,7 +21,7 @@ import { dashboardsModel } from '~/models/dashboardsModel'
 import { groupsModel } from '~/models/groupsModel'
 import { insightsModel } from '~/models/insightsModel'
 import { tagsModel } from '~/models/tagsModel'
-import { Node } from '~/queries/schema'
+import { DashboardFilter, HogQLVariable, Node } from '~/queries/schema'
 import { InsightLogicProps, InsightShortId, ItemMode, QueryBasedInsightModel, SetInsightOptions } from '~/types'
 
 import { teamLogic } from '../teamLogic'
@@ -77,8 +77,14 @@ export const insightLogic: LogicWrapper<insightLogicType> = kea<insightLogicType
         saveInsight: (redirectToViewMode = true) => ({ redirectToViewMode }),
         saveInsightSuccess: true,
         saveInsightFailure: true,
-        loadInsight: (shortId: InsightShortId) => ({
+        loadInsight: (
+            shortId: InsightShortId,
+            filtersOverride?: DashboardFilter | null,
+            variablesOverride?: Record<string, HogQLVariable> | null
+        ) => ({
             shortId,
+            filtersOverride,
+            variablesOverride,
         }),
         updateInsight: (insightUpdate: Partial<QueryBasedInsightModel>, callback?: () => void) => ({
             insightUpdate,
@@ -95,9 +101,15 @@ export const insightLogic: LogicWrapper<insightLogicType> = kea<insightLogicType
         insight: [
             props.cachedInsight ?? createEmptyInsight(props.dashboardItemId || 'new'),
             {
-                loadInsight: async ({ shortId }, breakpoint) => {
+                loadInsight: async ({ shortId, filtersOverride, variablesOverride }, breakpoint) => {
                     await breakpoint(100)
-                    const insight = await insightsApi.getByShortId(shortId, undefined, 'async')
+                    const insight = await insightsApi.getByShortId(
+                        shortId,
+                        undefined,
+                        'async',
+                        filtersOverride,
+                        variablesOverride
+                    )
 
                     if (!insight) {
                         throw new Error(`Insight with shortId ${shortId} not found`)
@@ -416,7 +428,11 @@ export const insightLogic: LogicWrapper<insightLogicType> = kea<insightLogicType
             }
 
             if (!props.doNotLoad && !props.cachedInsight) {
-                actions.loadInsight(props.dashboardItemId as InsightShortId)
+                actions.loadInsight(
+                    props.dashboardItemId as InsightShortId,
+                    props.filtersOverride,
+                    props.variablesOverride
+                )
             }
         },
     })),

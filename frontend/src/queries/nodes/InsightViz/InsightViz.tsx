@@ -10,7 +10,7 @@ import { insightVizDataLogic } from 'scenes/insights/insightVizDataLogic'
 import { keyForInsightLogicProps } from 'scenes/insights/sharedUtils'
 
 import { ErrorBoundary } from '~/layout/ErrorBoundary'
-import { InsightVizNode } from '~/queries/schema'
+import { DashboardFilter, HogQLVariable, InsightVizNode } from '~/queries/schema'
 import { QueryContext } from '~/queries/types'
 import { isFunnelsQuery } from '~/queries/utils'
 import { InsightLogicProps, ItemMode } from '~/types'
@@ -32,21 +32,36 @@ export const insightVizDataCollectionId = (props: InsightLogicProps<any> | undef
 type InsightVizProps = {
     uniqueKey?: string | number
     query: InsightVizNode
-    setQuery?: (node: InsightVizNode) => void
+    setQuery: (node: InsightVizNode) => void
     context?: QueryContext
     readOnly?: boolean
     embedded?: boolean
+    inSharedMode?: boolean
+    filtersOverride?: DashboardFilter | null
+    variablesOverride?: Record<string, HogQLVariable> | null
 }
 
 let uniqueNode = 0
 
-export function InsightViz({ uniqueKey, query, setQuery, context, readOnly, embedded }: InsightVizProps): JSX.Element {
+export function InsightViz({
+    uniqueKey,
+    query,
+    setQuery,
+    context,
+    readOnly,
+    embedded,
+    inSharedMode,
+    filtersOverride,
+    variablesOverride,
+}: InsightVizProps): JSX.Element {
     const [key] = useState(() => `InsightViz.${uniqueKey || uniqueNode++}`)
     const insightProps: InsightLogicProps = context?.insightProps || {
         dashboardItemId: `new-AdHoc.${key}`,
         query,
         setQuery,
         dataNodeCollectionId: key,
+        filtersOverride,
+        variablesOverride,
     }
 
     if (!insightProps.setQuery && setQuery) {
@@ -62,6 +77,8 @@ export function InsightViz({ uniqueKey, query, setQuery, context, readOnly, embe
         onData: insightProps.onData,
         loadPriority: insightProps.loadPriority,
         dataNodeCollectionId: insightVizDataCollectionId(insightProps, vizKey),
+        filtersOverride,
+        variablesOverride,
     }
 
     const { insightMode } = useValues(insightSceneLogic)
@@ -90,6 +107,7 @@ export function InsightViz({ uniqueKey, query, setQuery, context, readOnly, embe
             disableLastComputationRefresh={disableLastComputationRefresh}
             showingResults={showingResults}
             embedded={isEmbedded}
+            inSharedMode={inSharedMode}
         />
     )
 

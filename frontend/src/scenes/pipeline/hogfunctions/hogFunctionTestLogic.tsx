@@ -1,9 +1,10 @@
 import { lemonToast } from '@posthog/lemon-ui'
-import { actions, afterMount, connect, kea, key, path, props, reducers } from 'kea'
+import { actions, afterMount, connect, kea, key, listeners, path, props, reducers } from 'kea'
 import { forms } from 'kea-forms'
 import api from 'lib/api'
 import { tryJsonParse } from 'lib/utils'
 
+import { groupsModel } from '~/models/groupsModel'
 import { LogEntry } from '~/types'
 
 import { hogFunctionConfigurationLogic, sanitizeConfiguration } from './hogFunctionConfigurationLogic'
@@ -30,9 +31,22 @@ export const hogFunctionTestLogic = kea<hogFunctionTestLogicType>([
     connect((props: HogFunctionTestLogicProps) => ({
         values: [
             hogFunctionConfigurationLogic({ id: props.id }),
-            ['configuration', 'configurationHasErrors', 'exampleInvocationGlobals'],
+            [
+                'configuration',
+                'configurationHasErrors',
+                'sampleGlobals',
+                'sampleGlobalsLoading',
+                'exampleInvocationGlobals',
+                'sampleGlobalsError',
+                'type',
+            ],
+            groupsModel,
+            ['groupTypes'],
         ],
-        actions: [hogFunctionConfigurationLogic({ id: props.id }), ['touchConfigurationField']],
+        actions: [
+            hogFunctionConfigurationLogic({ id: props.id }),
+            ['touchConfigurationField', 'loadSampleGlobalsSuccess', 'loadSampleGlobals'],
+        ],
     })),
     actions({
         setTestResult: (result: HogFunctionTestInvocationResult | null) => ({ result }),
@@ -53,6 +67,13 @@ export const hogFunctionTestLogic = kea<hogFunctionTestLogicType>([
             },
         ],
     }),
+    listeners(({ values, actions }) => ({
+        loadSampleGlobalsSuccess: () => {
+            if (values.type === 'destination') {
+                actions.setTestInvocationValue('globals', JSON.stringify(values.sampleGlobals, null, 2))
+            }
+        },
+    })),
     forms(({ props, actions, values }) => ({
         testInvocation: {
             defaults: {
@@ -93,6 +114,24 @@ export const hogFunctionTestLogic = kea<hogFunctionTestLogicType>([
     })),
 
     afterMount(({ actions, values }) => {
-        actions.setTestInvocationValue('globals', JSON.stringify(values.exampleInvocationGlobals, null, 2))
+        if (values.type === 'email') {
+            const email = {
+                from: 'me@example.com',
+                to: 'you@example.com',
+                subject: 'Hello',
+                html: 'hello world',
+            }
+            actions.setTestInvocationValue(
+                'globals',
+                JSON.stringify({ email, person: values.exampleInvocationGlobals.person }, null, 2)
+            )
+        } else if (values.type === 'broadcast') {
+            actions.setTestInvocationValue(
+                'globals',
+                JSON.stringify({ person: values.exampleInvocationGlobals.person }, null, 2)
+            )
+        } else {
+            actions.setTestInvocationValue('globals', '{/* Please wait, fetching a real event. */}')
+        }
     }),
 ])

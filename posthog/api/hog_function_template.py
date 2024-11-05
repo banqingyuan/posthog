@@ -1,15 +1,12 @@
 import structlog
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import viewsets
+from rest_framework import viewsets, permissions
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.exceptions import NotFound
 
-from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.cdp.templates import HOG_FUNCTION_TEMPLATES
 from posthog.cdp.templates.hog_function_template import HogFunctionTemplate, HogFunctionSubTemplate
-from posthog.models.hog_functions.hog_function import HogFunction
-from posthog.permissions import PostHogFeatureFlagPermission
 from rest_framework_dataclasses.serializers import DataclassSerializer
 
 
@@ -28,30 +25,22 @@ class HogFunctionTemplateSerializer(DataclassSerializer):
         dataclass = HogFunctionTemplate
 
 
-class HogFunctionTemplateViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
-    scope_object = "INTERNAL"  # Keep internal until we are happy to release this GA
-    queryset = HogFunction.objects.none()
+# NOTE: There is nothing currently private about these values
+class PublicHogFunctionTemplateViewSet(viewsets.GenericViewSet):
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["id", "team", "created_by", "enabled"]
-
-    permission_classes = [PostHogFeatureFlagPermission]
-    posthog_feature_flag = {"hog-functions": ["create", "partial_update", "update"]}
-
+    filterset_fields = ["id", "team", "created_by", "enabled", "type"]
+    permission_classes = [permissions.AllowAny]
     serializer_class = HogFunctionTemplateSerializer
 
-    def _get_templates(self):
-        # TODO: Filtering for status?
-        data = HOG_FUNCTION_TEMPLATES
-        return data
-
     def list(self, request: Request, *args, **kwargs):
-        page = self.paginate_queryset(self._get_templates())
+        type = self.request.GET.get("type", "destination")
+        templates = [item for item in HOG_FUNCTION_TEMPLATES if item.type == type]
+        page = self.paginate_queryset(templates)
         serializer = self.get_serializer(page, many=True)
         return self.get_paginated_response(serializer.data)
 
     def retrieve(self, request: Request, *args, **kwargs):
-        data = self._get_templates()
-        item = next((item for item in data if item.id == kwargs["pk"]), None)
+        item = next((item for item in HOG_FUNCTION_TEMPLATES if item.id == kwargs["pk"]), None)
 
         if not item:
             raise NotFound(f"Template with id {kwargs['pk']} not found.")

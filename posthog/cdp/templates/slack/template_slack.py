@@ -2,10 +2,12 @@ from posthog.cdp.templates.hog_function_template import HogFunctionTemplate, Hog
 
 template: HogFunctionTemplate = HogFunctionTemplate(
     status="free",
+    type="destination",
     id="template-slack",
-    name="Post a Slack message",
+    name="Slack",
     description="Sends a message to a slack channel",
     icon_url="/static/services/slack.png",
+    category=["Customer Success"],
     hog="""
 let res := fetch('https://slack.com/api/chat.postMessage', {
   'body': {
@@ -69,7 +71,7 @@ if (res.status != 200 or not res.body.ok) {
             "default": [
                 {
                     "text": {
-                        "text": "*{person.name}* triggered event: '{event.name}'",
+                        "text": "*{person.name}* triggered event: '{event.event}'",
                         "type": "mrkdwn",
                     },
                     "type": "section",
@@ -98,6 +100,7 @@ if (res.status != 200 or not res.body.ok) {
             "type": "string",
             "label": "Plain text message",
             "description": "Optional fallback message if blocks are not provided or supported",
+            "default": "*{person.name}* triggered event: '{event.event}'",
             "secret": False,
             "required": False,
         },

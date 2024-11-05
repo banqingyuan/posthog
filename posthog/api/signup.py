@@ -29,6 +29,7 @@ from posthog.models import (
     Organization,
     OrganizationDomain,
     OrganizationInvite,
+    InviteExpiredException,
     Team,
     User,
 )
@@ -161,7 +162,7 @@ class SignupSerializer(serializers.Serializer):
         return self._user
 
     def create_team(self, organization: Organization, user: User) -> Team:
-        return Team.objects.create_with_data(user=user, organization=organization)
+        return Team.objects.create_with_data(initiating_user=user, organization=organization)
 
     def to_representation(self, instance) -> dict:
         data = UserBasicSerializer(instance=instance).data
@@ -219,6 +220,14 @@ class InviteSignupSerializer(serializers.Serializer):
             invite: OrganizationInvite = OrganizationInvite.objects.select_related("organization").get(id=invite_id)
         except OrganizationInvite.DoesNotExist:
             raise serializers.ValidationError("The provided invite ID is not valid.")
+
+        if invite.target_email and OrganizationDomain.objects.get_sso_enforcement_for_email_address(
+            invite.target_email
+        ):
+            raise serializers.ValidationError(
+                "Sign up with a password is disabled because SSO login is enforced for this domain. Please log in with your SSO credentials.",
+                code="sso_enforced",
+            )
 
         with transaction.atomic():
             if not user:
@@ -446,7 +455,7 @@ def process_social_domain_jit_provisioning_signup(
                         message = "Account unable to be created. This account may already exist. Please try again or use different credentials."
                         raise ValidationError(message, code="unknown", params={"source": "social_create_user"})
 
-                except OrganizationInvite.DoesNotExist:
+                except (OrganizationInvite.DoesNotExist, InviteExpiredException):
                     user = User.objects.create_and_join(
                         organization=domain_instance.organization,
                         email=email,

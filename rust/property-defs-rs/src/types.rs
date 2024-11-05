@@ -25,7 +25,7 @@ pub const SKIP_PROPERTIES: [&str; 9] = [
     "$groups",
 ];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum PropertyParentType {
     Event = 1,
     Person = 2,
@@ -44,7 +44,7 @@ impl From<PropertyParentType> for i32 {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq, PartialOrd, Ord)]
 pub enum PropertyValueType {
     DateTime,
     String,
@@ -66,7 +66,7 @@ impl fmt::Display for PropertyValueType {
 }
 
 // The grouptypemapping table uses i32's, but we get group types by name, so we have to resolve them before DB writes, sigh
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum GroupType {
     Unresolved(String),
     Resolved(String, i32),
@@ -81,7 +81,7 @@ impl GroupType {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct PropertyDefinition {
     pub team_id: i32,
     pub name: String,
@@ -94,23 +94,23 @@ pub struct PropertyDefinition {
     pub query_usage_30_day: Option<i64>,      // Deprecated
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct EventDefinition {
     pub name: String,
     pub team_id: i32,
-    pub last_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>, // Always floored to our update rate for last_seen, so this Eq derive is safe for deduping
 }
 
 // Derived hash since these are keyed on all fields in the DB
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord)]
 pub struct EventProperty {
-    team_id: i32,
-    event: String,
-    property: String,
+    pub team_id: i32,
+    pub event: String,
+    pub property: String,
 }
 
 // Represents a generic update, but comparable, allowing us to dedupe and cache updates
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Update {
     Event(EventDefinition),
     Property(PropertyDefinition),
@@ -142,11 +142,11 @@ impl From<&Event> for EventDefinition {
         EventDefinition {
             name: sanitize_event_name(&event.event),
             team_id: event.team_id,
-            // We round last seen to the nearest day, as per the TS impl. Unwrap is safe here because we
+            // We round last seen to the nearest hour. Unwrap is safe here because we
             // the duration is positive, non-zero, and smaller than time since epoch. We use this
             // in the hash value, so updates which would modify this in the DB are issued even
             // if another otherwise-identical event definition is in the cache
-            last_seen_at: floor_datetime(Utc::now(), Duration::days(1)).unwrap(),
+            last_seen_at: floor_datetime(Utc::now(), Duration::hours(1)).unwrap(),
         }
     }
 }
@@ -427,7 +427,7 @@ impl EventDefinition {
             Uuid::now_v7(),
             self.name,
             self.team_id,
-            self.last_seen_at
+            Utc::now() // We floor the update datetime to the nearest day for cache purposes, but can insert the exact time we see the event
         ).execute(executor).await.map(|_| ())
     }
 }
@@ -439,11 +439,26 @@ impl PropertyDefinition {
     {
         let group_type_index = match &self.group_type_index {
             Some(GroupType::Resolved(_, i)) => Some(*i as i16),
+            Some(GroupType::Unresolved(group_name)) => {
+                warn!(
+                    "Group type {} not resolved for property definition {} for team {}, skipping update",
+                    group_name, self.name, self.team_id
+                );
+                None
+            }
             _ => {
-                warn!("Group type not resolved for property definition, skipping");
+                // We don't have a group type, so we don't have a group type index
                 None
             }
         };
+
+        if group_type_index.is_none() && matches!(self.event_type, PropertyParentType::Group) {
+            // Some teams/users wildly misuse group-types, and if we fail to issue an update
+            // during the transaction (which we do if we don't have a group-type index for a
+            // group property), the entire transaction is aborted, so instead we just warn
+            // loudly about this (above, and at resolve time), and drop the update.
+            return Ok(());
+        }
 
         sqlx::query!(
             r#"
@@ -477,5 +492,23 @@ impl EventProperty {
         .execute(executor)
         .await
         .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use chrono::{Timelike, Utc};
+
+    use crate::types::floor_datetime;
+
+    #[test]
+    fn test_date_flooring() {
+        let timestamp = Utc::now();
+        let rounded = floor_datetime(timestamp, chrono::Duration::days(1)).unwrap();
+        assert_eq!(rounded.hour(), 0);
+        assert_eq!(rounded.minute(), 0);
+        assert_eq!(rounded.second(), 0);
+        assert_eq!(rounded.nanosecond(), 0);
+        assert!(rounded <= timestamp);
     }
 }

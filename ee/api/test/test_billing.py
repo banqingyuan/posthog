@@ -318,6 +318,7 @@ class TestBillingAPI(APILicensedTest):
 
         assert decoded_token == {
             "aud": "posthog:license-key",
+            "distinct_id": str(self.user.distinct_id),
             "exp": 1640996100,
             "id": self.license.key.split("::")[0],
             "organization_id": str(self.organization.id),
@@ -777,6 +778,7 @@ class TestBillingAPI(APILicensedTest):
         # Create a demo project
         self.organization_membership.level = OrganizationMembership.Level.ADMIN
         self.organization_membership.save()
+        self.assertEqual(Team.objects.count(), 1)
         response = self.client.post("/api/projects/", {"name": "Test", "is_demo": True})
         self.assertEqual(response.status_code, 201)
         self.assertEqual(Team.objects.count(), 3)

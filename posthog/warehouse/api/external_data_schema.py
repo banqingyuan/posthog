@@ -2,6 +2,10 @@ from rest_framework import serializers
 import structlog
 import temporalio
 from posthog.temporal.data_imports.pipelines.schemas import PIPELINE_TYPE_INCREMENTAL_FIELDS_MAPPING
+from posthog.temporal.data_imports.pipelines.bigquery import (
+    get_schemas as get_bigquery_schemas,
+    filter_incremental_fields as filter_bigquery_incremental_fields,
+)
 from posthog.warehouse.models import ExternalDataSchema, ExternalDataJob
 from typing import Optional, Any
 from posthog.api.routing import TeamAndOrgViewSetMixin
@@ -46,6 +50,7 @@ class ExternalDataSchemaSerializer(serializers.ModelSerializer):
     incremental_field = serializers.SerializerMethodField(read_only=True)
     incremental_field_type = serializers.SerializerMethodField(read_only=True)
     sync_frequency = serializers.SerializerMethodField(read_only=True)
+    status = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = ExternalDataSchema
@@ -73,6 +78,12 @@ class ExternalDataSchemaSerializer(serializers.ModelSerializer):
             "latest_error",
             "status",
         ]
+
+    def get_status(self, schema: ExternalDataSchema) -> str | None:
+        if schema.status == ExternalDataSchema.Status.CANCELLED:
+            return "Billing limits"
+
+        return schema.status
 
     def get_incremental(self, schema: ExternalDataSchema) -> bool:
         return schema.is_incremental
@@ -350,6 +361,28 @@ class ExternalDataSchemaViewset(TeamAndOrgViewSetMixin, LogEntryMixin, viewsets.
             incremental_columns = [
                 {"field": name, "field_type": field_type, "label": name, "type": field_type}
                 for name, field_type in filter_snowflake_incremental_fields(columns)
+            ]
+        elif source.source_type == ExternalDataSource.Type.BIGQUERY:
+            dataset_id = source.job_inputs.get("dataset_id")
+            project_id = source.job_inputs.get("project_id")
+            private_key = source.job_inputs.get("private_key")
+            private_key_id = source.job_inputs.get("private_key_id")
+            client_email = source.job_inputs.get("client_email")
+            token_uri = source.job_inputs.get("token_uri")
+
+            bq_schemas = get_bigquery_schemas(
+                dataset_id=dataset_id,
+                project_id=project_id,
+                private_key=private_key,
+                private_key_id=private_key_id,
+                client_email=client_email,
+                token_uri=token_uri,
+            )
+
+            columns = bq_schemas.get(instance.name, [])
+            incremental_columns = [
+                {"field": name, "field_type": field_type, "label": name, "type": field_type}
+                for name, field_type in filter_bigquery_incremental_fields(columns)
             ]
         else:
             mapping = PIPELINE_TYPE_INCREMENTAL_FIELDS_MAPPING.get(source.source_type)

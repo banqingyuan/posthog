@@ -9,7 +9,15 @@ import { Error404 as Error404Component } from '~/layout/Error404'
 import { ErrorNetwork as ErrorNetworkComponent } from '~/layout/ErrorNetwork'
 import { ErrorProjectUnavailable as ErrorProjectUnavailableComponent } from '~/layout/ErrorProjectUnavailable'
 import { EventsQuery } from '~/queries/schema'
-import { ActivityScope, InsightShortId, PipelineStage, PipelineTab, PropertyFilterType, ReplayTabs } from '~/types'
+import {
+    ActivityScope,
+    ActivityTab,
+    InsightShortId,
+    PipelineStage,
+    PipelineTab,
+    PropertyFilterType,
+    ReplayTabs,
+} from '~/types'
 
 export const emptySceneParams = { params: {}, searchParams: {}, hashParams: {} }
 
@@ -215,6 +223,12 @@ export const sceneConfigurations: Record<Scene, SceneConfig> = {
         name: 'New survey',
         defaultDocsPath: '/docs/surveys/creating-surveys',
     },
+    [Scene.DataModel]: {
+        projectBased: true,
+        name: 'Visualize person schema',
+        defaultDocsPath: '/docs/data-datawarehouse',
+        layout: 'app-canvas',
+    },
     [Scene.DataWarehouse]: {
         projectBased: true,
         name: 'Data warehouse',
@@ -252,6 +266,12 @@ export const sceneConfigurations: Record<Scene, SceneConfig> = {
     [Scene.ProjectHomepage]: {
         projectBased: true,
         name: 'Homepage',
+    },
+    [Scene.Max]: {
+        projectBased: true,
+        name: 'Max AI',
+        layout: 'app-raw',
+        hideProjectNotice: true, // FIXME: Currently doesn't render well...
     },
     [Scene.IntegrationsRedirect]: {
         name: 'Integrations redirect',
@@ -330,6 +350,11 @@ export const sceneConfigurations: Record<Scene, SceneConfig> = {
         organizationBased: true,
         defaultDocsPath: '/pricing',
     },
+    [Scene.BillingAuthorizationStatus]: {
+        hideProjectNotice: true,
+        organizationBased: true,
+        defaultDocsPath: '/pricing',
+    },
     [Scene.Unsubscribe]: {
         allowUnauthenticated: true,
         layout: 'app-raw',
@@ -343,7 +368,7 @@ export const sceneConfigurations: Record<Scene, SceneConfig> = {
     },
     [Scene.Notebook]: {
         projectBased: true,
-        hideProjectNotice: true, // Currently doesn't render well...
+        hideProjectNotice: true, // FIXME: Currently doesn't render well...
         name: 'Notebook',
         layout: 'app-raw',
         activityScope: ActivityScope.NOTEBOOK,
@@ -377,6 +402,14 @@ export const sceneConfigurations: Record<Scene, SceneConfig> = {
         projectBased: true,
         name: 'Session attribution explorer (beta)',
     },
+    [Scene.MessagingBroadcasts]: {
+        projectBased: true,
+        name: 'Broadcasts',
+    },
+    [Scene.MessagingProviders]: {
+        projectBased: true,
+        name: 'Providers',
+    },
 }
 
 // NOTE: These redirects will fully replace the URL. If you want to keep support for query and hash params then you should use a function (not string) redirect
@@ -392,6 +425,7 @@ export const redirects: Record<
     '/i/:shortId': ({ shortId }) => urls.insightView(shortId),
     '/action/:id': ({ id }) => urls.action(id),
     '/action': urls.createAction(),
+    '/events': urls.activity(),
     '/events/actions': urls.actions(),
     '/events/stats': urls.eventDefinitions(),
     '/events/stats/:id': ({ id }) => urls.eventDefinition(id),
@@ -411,7 +445,7 @@ export const redirects: Record<
         } catch (e) {
             lemonToast.error('Invalid event timestamp')
         }
-        return combineUrl(urls.events(), {}, { q: query }).url
+        return combineUrl(urls.activity(ActivityTab.ExploreEvents), {}, { q: query }).url
     },
     '/events/properties': urls.propertyDefinitions(),
     '/events/properties/:id': ({ id }) => urls.propertyDefinition(id),
@@ -443,6 +477,7 @@ export const redirects: Record<
     '/batch_exports': urls.pipeline(PipelineTab.Destinations),
     '/apps': urls.pipeline(PipelineTab.Overview),
     '/apps/:id': ({ id }) => urls.pipelineNode(PipelineStage.Transformation, id),
+    '/messaging': urls.messagingBroadcasts(),
 }
 
 export const routes: Record<string, Scene> = {
@@ -461,8 +496,9 @@ export const routes: Record<string, Scene> = {
     [urls.insightView(':shortId' as InsightShortId)]: Scene.Insight,
     [urls.insightSubcriptions(':shortId' as InsightShortId)]: Scene.Insight,
     [urls.insightSubcription(':shortId' as InsightShortId, ':itemId')]: Scene.Insight,
-    [urls.alert(':shortId' as InsightShortId, ':itemId')]: Scene.Insight,
-    [urls.alerts(':shortId' as InsightShortId)]: Scene.Insight,
+    [urls.alert(':shortId')]: Scene.SavedInsights,
+    [urls.alerts()]: Scene.SavedInsights,
+    [urls.insightAlerts(':shortId' as InsightShortId)]: Scene.Insight,
     [urls.insightSharing(':shortId' as InsightShortId)]: Scene.Insight,
     [urls.savedInsights()]: Scene.SavedInsights,
     [urls.webAnalytics()]: Scene.WebAnalytics,
@@ -476,7 +512,6 @@ export const routes: Record<string, Scene> = {
     [urls.dataManagementHistory()]: Scene.DataManagement,
     [urls.database()]: Scene.DataManagement,
     [urls.activity(':tab')]: Scene.Activity,
-    [urls.events()]: Scene.Activity,
     [urls.replay()]: Scene.Replay,
     // One entry for every available tab
     ...Object.values(ReplayTabs).reduce((acc, tab) => {
@@ -508,6 +543,7 @@ export const routes: Record<string, Scene> = {
     [urls.surveys()]: Scene.Surveys,
     [urls.survey(':id')]: Scene.Survey,
     [urls.surveyTemplates()]: Scene.SurveyTemplates,
+    [urls.dataModel()]: Scene.DataModel,
     [urls.dataWarehouse()]: Scene.DataWarehouse,
     [urls.dataWarehouseView(':id')]: Scene.DataWarehouse,
     [urls.dataWarehouseTable()]: Scene.DataWarehouseTable,
@@ -517,8 +553,10 @@ export const routes: Record<string, Scene> = {
     [urls.annotations()]: Scene.DataManagement,
     [urls.annotation(':id')]: Scene.DataManagement,
     [urls.projectHomepage()]: Scene.ProjectHomepage,
+    [urls.max()]: Scene.Max,
     [urls.projectCreateFirst()]: Scene.ProjectCreateFirst,
     [urls.organizationBilling()]: Scene.Billing,
+    [urls.billingAuthorizationStatus()]: Scene.BillingAuthorizationStatus,
     [urls.organizationCreateFirst()]: Scene.OrganizationCreateFirst,
     [urls.organizationCreationConfirm()]: Scene.OrganizationCreationConfirm,
     [urls.instanceStatus()]: Scene.SystemStatus,
@@ -555,4 +593,11 @@ export const routes: Record<string, Scene> = {
     [urls.moveToPostHogCloud()]: Scene.MoveToPostHogCloud,
     [urls.heatmaps()]: Scene.Heatmaps,
     [urls.sessionAttributionExplorer()]: Scene.SessionAttributionExplorer,
+    [urls.messagingProviders()]: Scene.MessagingProviders,
+    [urls.messagingProvider(':id')]: Scene.MessagingProviders,
+    [urls.messagingProviderNew()]: Scene.MessagingProviders,
+    [urls.messagingProviderNew(':template')]: Scene.MessagingProviders,
+    [urls.messagingBroadcasts()]: Scene.MessagingBroadcasts,
+    [urls.messagingBroadcast(':id')]: Scene.MessagingBroadcasts,
+    [urls.messagingBroadcastNew()]: Scene.MessagingBroadcasts,
 }

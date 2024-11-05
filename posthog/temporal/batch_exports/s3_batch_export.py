@@ -131,6 +131,13 @@ class IntermittentUploadPartTimeoutError(Exception):
         super().__init__(f"An intermittent `RequestTimeout` was raised while attempting to upload part {part_number}")
 
 
+class EmptyS3EndpointURLError(Exception):
+    """Exception raised when an S3 endpoint URL is empty string."""
+
+    def __init__(self):
+        super().__init__("Endpoint URL cannot be empty.")
+
+
 Part = dict[str, str | int]
 
 
@@ -177,6 +184,9 @@ class S3MultiPartUpload:
         self.kms_key_id = kms_key_id
         self.upload_id: str | None = None
         self.parts: list[Part] = []
+
+        if self.endpoint_url == "":
+            raise EmptyS3EndpointURLError()
 
     def to_state(self) -> S3MultiPartUploadState:
         """Produce state tuple that can be used to resume this S3MultiPartUpload."""
@@ -399,7 +409,7 @@ class S3InsertInputs:
     region: str
     prefix: str
     team_id: int
-    data_interval_start: str
+    data_interval_start: str | None
     data_interval_end: str
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
@@ -418,7 +428,7 @@ class S3InsertInputs:
     batch_export_schema: BatchExportSchema | None = None
 
 
-async def initialize_and_resume_multipart_upload(inputs: S3InsertInputs) -> tuple[S3MultiPartUpload, str]:
+async def initialize_and_resume_multipart_upload(inputs: S3InsertInputs) -> tuple[S3MultiPartUpload, str | None]:
     """Initialize a S3MultiPartUpload and resume it from a hearbeat state if available."""
     logger = await bind_temporal_worker_logger(team_id=inputs.team_id, destination="S3")
     key = get_s3_key(inputs)
@@ -441,7 +451,7 @@ async def initialize_and_resume_multipart_upload(inputs: S3InsertInputs) -> tupl
     except IndexError:
         # This is the error we expect when no details as the sequence will be empty.
         interval_start = inputs.data_interval_start
-        logger.debug(
+        await logger.adebug(
             "Did not receive details from previous activity Execution. Export will start from the beginning %s",
             interval_start,
         )
@@ -449,12 +459,12 @@ async def initialize_and_resume_multipart_upload(inputs: S3InsertInputs) -> tupl
         # We still start from the beginning, but we make a point to log unexpected errors.
         # Ideally, any new exceptions should be added to the previous block after the first time and we will never land here.
         interval_start = inputs.data_interval_start
-        logger.warning(
+        await logger.awarning(
             "Did not receive details from previous activity Execution due to an unexpected error. Export will start from the beginning %s",
             interval_start,
         )
     else:
-        logger.info(
+        await logger.ainfo(
             "Received details from previous activity. Export will attempt to resume from %s",
             interval_start,
         )
@@ -464,7 +474,7 @@ async def initialize_and_resume_multipart_upload(inputs: S3InsertInputs) -> tupl
             # Even if we receive details we cannot resume a brotli compressed upload as we have lost the compressor state.
             interval_start = inputs.data_interval_start
 
-            logger.info(
+            await logger.ainfo(
                 f"Export will start from the beginning as we are using brotli compression: %s",
                 interval_start,
             )
@@ -502,10 +512,10 @@ async def insert_into_s3_activity(inputs: S3InsertInputs) -> RecordsCompleted:
     files.
     """
     logger = await bind_temporal_worker_logger(team_id=inputs.team_id, destination="S3")
-    logger.info(
+    await logger.ainfo(
         "Batch exporting range %s - %s to S3: %s",
-        inputs.data_interval_start,
-        inputs.data_interval_end,
+        inputs.data_interval_start or "START",
+        inputs.data_interval_end or "END",
         get_s3_key(inputs),
     )
 
@@ -557,14 +567,14 @@ async def insert_into_s3_activity(inputs: S3InsertInputs) -> RecordsCompleted:
                 error: Exception | None,
             ):
                 if error is not None:
-                    logger.debug("Error while writing part %d", s3_upload.part_number + 1, exc_info=error)
-                    logger.warn(
+                    await logger.adebug("Error while writing part %d", s3_upload.part_number + 1, exc_info=error)
+                    await logger.awarn(
                         "An error was detected while writing part %d. Partial part will not be uploaded in case it can be retried.",
                         s3_upload.part_number + 1,
                     )
                     return
 
-                logger.debug(
+                await logger.adebug(
                     "Uploading %s part %s containing %s records with size %s bytes",
                     "last " if last else "",
                     s3_upload.part_number + 1,
@@ -662,11 +672,12 @@ class S3BatchExportWorkflow(PostHogWorkflow):
     async def run(self, inputs: S3BatchExportInputs):
         """Workflow implementation to export data to S3 bucket."""
         data_interval_start, data_interval_end = get_data_interval(inputs.interval, inputs.data_interval_end)
+        should_backfill_from_beginning = inputs.is_backfill and inputs.is_earliest_backfill
 
         start_batch_export_run_inputs = StartBatchExportRunInputs(
             team_id=inputs.team_id,
             batch_export_id=inputs.batch_export_id,
-            data_interval_start=data_interval_start.isoformat(),
+            data_interval_start=data_interval_start.isoformat() if not should_backfill_from_beginning else None,
             data_interval_end=data_interval_end.isoformat(),
             exclude_events=inputs.exclude_events,
             include_events=inputs.include_events,
@@ -699,7 +710,7 @@ class S3BatchExportWorkflow(PostHogWorkflow):
             aws_access_key_id=inputs.aws_access_key_id,
             aws_secret_access_key=inputs.aws_secret_access_key,
             endpoint_url=inputs.endpoint_url,
-            data_interval_start=data_interval_start.isoformat(),
+            data_interval_start=data_interval_start.isoformat() if not should_backfill_from_beginning else None,
             data_interval_end=data_interval_end.isoformat(),
             compression=inputs.compression,
             exclude_events=inputs.exclude_events,
@@ -727,6 +738,8 @@ class S3BatchExportWorkflow(PostHogWorkflow):
                 "NoSuchBucket",
                 # Couldn't connect to custom S3 endpoint
                 "EndpointConnectionError",
+                # Input contained an empty S3 endpoint URL
+                "EmptyS3EndpointURLError",
             ],
             finish_inputs=finish_inputs,
         )

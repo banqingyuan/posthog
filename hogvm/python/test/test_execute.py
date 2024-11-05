@@ -978,9 +978,15 @@ class TestBytecodeExecute:
         assert self._run_program("let a := {'b': {'d': 2}}; return (((a??{}).b)??{}).c") is None
         assert self._run_program("let a := {'b': {'d': 2}}; return (((a??{}).b)??{}).d") == 2
         assert self._run_program("let a := {'b': {'d': 2}}; return a?.b?.c") is None
+        assert self._run_program("let a := {'b': {'d': 2}}; return a.b.c") is None
         assert self._run_program("let a := {'b': {'d': 2}}; return a?.b?.d") == 2
+        assert self._run_program("let a := {'b': {'d': 2}}; return a.b.d") == 2
         assert self._run_program("let a := {'b': {'d': 2}}; return a?.b?.['c']") is None
+        assert self._run_program("let a := {'b': {'d': 2}}; return a.b['c']") is None
         assert self._run_program("let a := {'b': {'d': 2}}; return a?.b?.['d']") == 2
+        assert self._run_program("let a := {'b': {'d': 2}}; return a.b['d']") == 2
+        assert self._run_program("return properties.foo") == "bar"
+        assert self._run_program("return properties.not.here") is None
 
     def test_bytecode_uncaught_errors(self):
         try:
@@ -1002,3 +1008,28 @@ class TestBytecodeExecute:
             assert e.payload == {"key": "value"}
         else:
             raise AssertionError("Expected Exception not raised")
+
+    def test_multiple_bytecodes(self):
+        ret = lambda string: {"bytecode": ["_H", 1, op.STRING, string, op.RETURN]}
+        call = lambda chunk: {"bytecode": ["_H", 1, op.STRING, chunk, op.CALL_GLOBAL, "import", 1, op.RETURN]}
+        res = execute_bytecode(
+            {
+                "root": call("code2"),
+                "code2": ret("banana"),
+            }
+        )
+        assert res.result == "banana"
+
+    def test_multiple_bytecodes_callback(self):
+        ret = lambda string: {"bytecode": ["_H", 1, op.STRING, string, op.RETURN]}
+        call = lambda chunk: {"bytecode": ["_H", 1, op.STRING, chunk, op.CALL_GLOBAL, "import", 1, op.RETURN]}
+        res = execute_bytecode(
+            {
+                "root": call("code2"),
+                "code2": call("code3"),
+                "code3": call("code4"),
+                "code4": call("code5"),
+                "code5": ret("tomato"),
+            }
+        )
+        assert res.result == "tomato"

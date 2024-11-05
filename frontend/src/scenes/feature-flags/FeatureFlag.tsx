@@ -1,6 +1,6 @@
 import './FeatureFlag.scss'
 
-import { IconCollapse, IconExpand, IconPlus, IconTrash } from '@posthog/icons'
+import { IconBalance, IconCollapse, IconExpand, IconPlus, IconTrash } from '@posthog/icons'
 import { LemonDialog, LemonSegmentedButton, LemonSkeleton, LemonSwitch } from '@posthog/lemon-ui'
 import { useActions, useValues } from 'kea'
 import { Form, Group } from 'kea-forms'
@@ -620,6 +620,7 @@ function UsageTab({ featureFlag }: { id: string; featureFlag: FeatureFlagType })
     let dashboard: DashboardType<QueryBasedInsightModel> | null = null
     if (dashboardId) {
         // FIXME: Refactor out into <ConnectedDashboard />, as React hooks under conditional branches are no good
+        // eslint-disable-next-line react-hooks/rules-of-hooks
         const dashboardLogicValues = useValues(
             dashboardLogic({ id: dashboardId, placement: DashboardPlacement.FeatureFlag })
         )
@@ -637,7 +638,7 @@ function UsageTab({ featureFlag }: { id: string; featureFlag: FeatureFlagType })
         ) {
             enrichUsageDashboard()
         }
-    }, [dashboard])
+    }, [dashboard, hasEnrichedAnalytics, enrichUsageDashboard])
 
     const propertyFilter: AnyPropertyFilter[] = [
         {
@@ -782,6 +783,11 @@ function FeatureFlagRollout({ readOnly }: { readOnly?: boolean }): JSX.Element {
                                 })
                             }}
                             label="Enabled"
+                            disabledReason={
+                                !featureFlag.can_edit
+                                    ? "You only have view access to this feature flag. To make changes, contact the flag's creator."
+                                    : null
+                            }
                             checked={featureFlag.active}
                         />
                         <span className="card-secondary mt-4">Type</span>
@@ -910,7 +916,7 @@ function FeatureFlagRollout({ readOnly }: { readOnly?: boolean }): JSX.Element {
                     ) : (
                         <div className="w-1/2">
                             <div className="text-muted mb-4">
-                                Specify a payload to be returned when the served value is{' '}
+                                Specify a valid JSON payload to be returned when the served value is{' '}
                                 <strong>
                                     <code>true</code>
                                 </strong>
@@ -944,9 +950,14 @@ function FeatureFlagRollout({ readOnly }: { readOnly?: boolean }): JSX.Element {
                                     </span>
                                 </div>
                             </div>
-                            <div className="col-span-4 flex items-center gap-1">
+                            <div className="col-span-3 flex justify-between items-center gap-1">
                                 <span>Rollout</span>
-                                <LemonButton onClick={distributeVariantsEqually}>(Redistribute)</LemonButton>
+                                <LemonButton
+                                    onClick={distributeVariantsEqually}
+                                    tooltip="Normalize variant rollout percentages"
+                                >
+                                    <IconBalance />
+                                </LemonButton>
                             </div>
                         </div>
                         {variants.map((variant, index) => (
@@ -1017,6 +1028,7 @@ function FeatureFlagRollout({ readOnly }: { readOnly?: boolean }): JSX.Element {
                                                                 }
                                                             }
                                                         }}
+                                                        suffix={<span>%</span>}
                                                     />
                                                     {filterGroups.filter((group) => group.variant === variant.key)
                                                         .length > 0 && (

@@ -4,6 +4,7 @@ from uuid import UUID
 
 from posthog.hogql import ast
 from posthog.hogql.ast import ConstantType, FieldTraverserType
+from posthog.hogql.base import _T_AST
 from posthog.hogql.context import HogQLContext
 from posthog.hogql.database.models import (
     FunctionCallTable,
@@ -19,10 +20,16 @@ from posthog.hogql.functions import find_hogql_posthog_function
 from posthog.hogql.functions.action import matches_action
 from posthog.hogql.functions.cohort import cohort_query_node
 from posthog.hogql.functions.mapping import HOGQL_CLICKHOUSE_FUNCTIONS, compare_types, validate_function_args
+from posthog.hogql.functions.recording_button import recording_button
 from posthog.hogql.functions.sparkline import sparkline
 from posthog.hogql.hogqlx import HOGQLX_COMPONENTS, convert_to_hx
 from posthog.hogql.parser import parse_select
-from posthog.hogql.resolver_utils import expand_hogqlx_query, lookup_cte_by_name, lookup_field_by_name
+from posthog.hogql.resolver_utils import (
+    expand_hogqlx_query,
+    lookup_cte_by_name,
+    lookup_field_by_name,
+    extract_select_queries,
+)
 from posthog.hogql.visitor import CloningVisitor, TraversingVisitor, clone_expr
 from posthog.models.utils import UUIDT
 
@@ -76,11 +83,11 @@ def resolve_types_from_table(
 
 
 def resolve_types(
-    node: ast.Expr | ast.SelectQuery,
+    node: _T_AST,
     context: HogQLContext,
     dialect: Literal["hogql", "clickhouse"],
     scopes: Optional[list[ast.SelectQueryType]] = None,
-) -> ast.Expr:
+) -> _T_AST:
     return Resolver(scopes=scopes, context=context, dialect=dialect).visit(node)
 
 
@@ -121,15 +128,17 @@ class Resolver(CloningVisitor):
             raise QueryError("Too many CTE expansions (50+). Probably a CTE loop.")
         return super().visit(node)
 
-    def visit_select_union_query(self, node: ast.SelectUnionQuery):
+    def visit_select_set_query(self, node: ast.SelectSetQuery):
         # all expressions combined by UNION ALL can use CTEs from the first expression
         # so we put these CTEs to the scope
-        default_ctes = node.select_queries[0].ctes if node.select_queries else None
+        default_ctes = next(extract_select_queries(node)).ctes
         if default_ctes:
             self.scopes.append(ast.SelectQueryType(ctes=default_ctes))
 
-        node = super().visit_select_union_query(node)
-        node.type = ast.SelectUnionQueryType(types=[expr.type for expr in node.select_queries])
+        node = super().visit_select_set_query(node)
+        node.type = ast.SelectSetQueryType(
+            types=[node.initial_select_query.type, *(x.select_query.type for x in node.subsequent_select_queries)]  # type: ignore
+        )
 
         if default_ctes:
             self.scopes.pop()
@@ -252,7 +261,7 @@ class Resolver(CloningVisitor):
             database_fields = table.get_asterisk()
             return [ast.Field(chain=[key]) for key in database_fields.keys()]
         elif (
-            isinstance(asterisk.table_type, ast.SelectUnionQueryType)
+            isinstance(asterisk.table_type, ast.SelectSetQueryType)
             or isinstance(asterisk.table_type, ast.SelectQueryType)
             or isinstance(asterisk.table_type, ast.SelectQueryAliasType)
             or isinstance(asterisk.table_type, ast.SelectViewType)
@@ -260,7 +269,7 @@ class Resolver(CloningVisitor):
             select = asterisk.table_type
             while isinstance(select, ast.SelectQueryAliasType) or isinstance(select, ast.SelectViewType):
                 select = select.select_query_type
-            if isinstance(select, ast.SelectUnionQueryType):
+            if isinstance(select, ast.SelectSetQueryType):
                 select = select.types[0]
             if isinstance(select, ast.SelectQueryType):
                 return [ast.Field(chain=[key]) for key in select.columns.keys()]
@@ -367,7 +376,7 @@ class Resolver(CloningVisitor):
 
             return node
 
-        elif isinstance(node.table, ast.SelectQuery) or isinstance(node.table, ast.SelectUnionQuery):
+        elif isinstance(node.table, ast.SelectQuery) or isinstance(node.table, ast.SelectSetQuery):
             node = cast(ast.JoinExpr, clone_expr(node))
             if node.constraint and node.constraint.constraint_type == "USING":
                 # visit USING constraint before adding the table to avoid ambiguous names
@@ -460,6 +469,8 @@ class Resolver(CloningVisitor):
             validate_function_args(node.args, func_meta.min_args, func_meta.max_args, node.name)
             if node.name == "sparkline":
                 return self.visit(sparkline(node=node, args=node.args))
+            if node.name == "recording_button":
+                return self.visit(recording_button(node=node, args=node.args))
             if node.name == "matchesAction":
                 return self.visit(matches_action(node=node, args=node.args, context=self.context))
 

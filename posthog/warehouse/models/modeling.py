@@ -10,6 +10,7 @@ from django.db import connection, models, transaction
 from posthog.hogql import ast
 from posthog.hogql.database.database import Database, create_hogql_database
 from posthog.hogql.parser import parse_select
+from posthog.hogql.resolver_utils import extract_select_queries
 from posthog.models.team import Team
 from posthog.models.user import User
 from posthog.models.utils import (
@@ -56,7 +57,7 @@ class LabelTreeField(models.Field):
 
 
 class LabelQuery(models.Lookup):
-    """Implement a lookup for ltree label queries using the ~ operator."""
+    """Implement a lookup for an ltree label query using the ~ operator."""
 
     lookup_name = "lquery"
 
@@ -71,7 +72,24 @@ class LabelQuery(models.Lookup):
         return "%s ~ %s" % (lhs, rhs), params  # noqa: UP031
 
 
+class LabelQueryArray(models.Lookup):
+    """Implement a lookup for an array of ltree label queries using the ? operator."""
+
+    lookup_name = "lqueryarray"
+
+    def __init__(self, *args, **kwargs):
+        self.prepare_rhs = False
+        super().__init__(*args, **kwargs)
+
+    def as_sql(self, compiler, connection):
+        lhs, lhs_params = self.process_lhs(compiler, connection)
+        rhs, rhs_params = self.process_rhs(compiler, connection)
+        params = lhs_params + rhs_params
+        return "%s ? %s" % (lhs, rhs), params  # noqa: UP031
+
+
 LabelTreeField.register_lookup(LabelQuery)
+LabelTreeField.register_lookup(LabelQueryArray)
 
 
 def get_parents_from_model_query(model_query: str) -> set[str]:
@@ -82,8 +100,8 @@ def get_parents_from_model_query(model_query: str) -> set[str]:
 
     hogql_query = parse_select(model_query)
 
-    if isinstance(hogql_query, ast.SelectUnionQuery):
-        queries = hogql_query.select_queries
+    if isinstance(hogql_query, ast.SelectSetQuery):
+        queries = list(extract_select_queries(hogql_query))
     else:
         queries = [hogql_query]
 
@@ -97,8 +115,8 @@ def get_parents_from_model_query(model_query: str) -> set[str]:
             for name, cte in query.ctes.items():
                 ctes.add(name)
 
-                if isinstance(cte.expr, ast.SelectUnionQuery):
-                    queries.extend(cte.expr.select_queries)
+                if isinstance(cte.expr, ast.SelectSetQuery):
+                    queries.extend(list(extract_select_queries(cte.expr)))
                 elif isinstance(cte.expr, ast.SelectQuery):
                     queries.append(cte.expr)
 
@@ -113,8 +131,8 @@ def get_parents_from_model_query(model_query: str) -> set[str]:
                 continue
 
             queries.append(join.table)
-        elif isinstance(join.table, ast.SelectUnionQuery):
-            queries.extend(join.table.select_queries)
+        elif isinstance(join.table, ast.SelectSetQuery):
+            queries.extend(list(extract_select_queries(join.table)))
 
         while join is not None:
             parent_name = join.table.chain[0]  # type: ignore

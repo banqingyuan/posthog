@@ -11,7 +11,7 @@ import { pipelineAccessLogic } from 'scenes/pipeline/pipelineAccessLogic'
 import { teamLogic } from 'scenes/teamLogic'
 import { userLogic } from 'scenes/userLogic'
 
-import { HogFunctionType } from '~/types'
+import { HogFunctionType, HogFunctionTypeType } from '~/types'
 
 import type { hogFunctionListLogicType } from './hogFunctionListLogicType'
 
@@ -20,11 +20,12 @@ export interface Fuse extends FuseClass<HogFunctionType> {}
 
 export type HogFunctionListFilters = {
     search?: string
-    onlyActive?: boolean
+    showPaused?: boolean
     filters?: Record<string, any>
 }
 
 export type HogFunctionListLogicProps = {
+    type: HogFunctionTypeType
     defaultFilters?: HogFunctionListFilters
     forceFilters?: HogFunctionListFilters
     syncFiltersWithUrl?: boolean
@@ -51,6 +52,7 @@ export const hogFunctionListLogic = kea<hogFunctionListLogicType>([
         deleteHogFunction: (hogFunction: HogFunctionType) => ({ hogFunction }),
         setFilters: (filters: Partial<HogFunctionListFilters>) => ({ filters }),
         resetFilters: true,
+        addHogFunction: (hogFunction: HogFunctionType) => ({ hogFunction }),
     }),
     reducers(({ props }) => ({
         filters: [
@@ -67,7 +69,7 @@ export const hogFunctionListLogic = kea<hogFunctionListLogicType>([
             },
         ],
     })),
-    loaders(({ values, actions }) => ({
+    loaders(({ values, actions, props }) => ({
         hogFunctions: [
             [] as HogFunctionType[],
             {
@@ -75,10 +77,10 @@ export const hogFunctionListLogic = kea<hogFunctionListLogicType>([
                     return (
                         await api.hogFunctions.list({
                             filters: values.filters?.filters,
+                            type: props.type,
                         })
                     ).results
                 },
-
                 deleteHogFunction: async ({ hogFunction }) => {
                     await deleteWithUndo({
                         endpoint: `projects/${teamLogic.values.currentTeamId}/hog_functions`,
@@ -112,6 +114,9 @@ export const hogFunctionListLogic = kea<hogFunctionListLogicType>([
                         ...hogFunctions.slice(hogFunctionIndex + 1),
                     ]
                 },
+                addHogFunction: ({ hogFunction }) => {
+                    return [hogFunction, ...values.hogFunctions]
+                },
             },
         ],
     })),
@@ -137,10 +142,10 @@ export const hogFunctionListLogic = kea<hogFunctionListLogicType>([
         filteredHogFunctions: [
             (s) => [s.filters, s.sortedHogFunctions, s.hogFunctionsFuse],
             (filters, hogFunctions, hogFunctionsFuse): HogFunctionType[] => {
-                const { search, onlyActive } = filters
+                const { search, showPaused } = filters
 
                 return (search ? hogFunctionsFuse.search(search).map((x) => x.item) : hogFunctions).filter((x) => {
-                    if (onlyActive && !x.enabled) {
+                    if (!showPaused && !x.enabled) {
                         return false
                     }
                     return true

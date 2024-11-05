@@ -50,6 +50,7 @@ export function LemonCollapse<K extends React.Key>({
     let isPanelExpanded: (key: K) => boolean
     let onPanelChange: (key: K, isExpanded: boolean) => void
     if (props.multiple) {
+        // eslint-disable-next-line react-hooks/rules-of-hooks
         const [localActiveKeys, setLocalActiveKeys] = useState<Set<K>>(new Set(props.defaultActiveKeys ?? []))
         const effectiveActiveKeys = props.activeKeys ? new Set(props.activeKeys) : localActiveKeys
         isPanelExpanded = (key: K) => effectiveActiveKeys.has(key)
@@ -64,6 +65,7 @@ export function LemonCollapse<K extends React.Key>({
             setLocalActiveKeys(newActiveKeys)
         }
     } else {
+        // eslint-disable-next-line react-hooks/rules-of-hooks
         const [localActiveKey, setLocalActiveKey] = useState<K | null>(props.defaultActiveKey ?? null)
         const effectiveActiveKey = props.activeKey ?? localActiveKey
         isPanelExpanded = (key: K) => key === effectiveActiveKey
@@ -96,6 +98,7 @@ interface LemonCollapsePanelProps {
     onChange: (isExpanded: boolean) => void
     className?: string
     dataAttr?: string
+    onHeaderClick?: () => void
 }
 
 function LemonCollapsePanel({
@@ -106,13 +109,17 @@ function LemonCollapsePanel({
     className,
     dataAttr,
     onChange,
+    onHeaderClick,
 }: LemonCollapsePanelProps): JSX.Element {
     const { height: contentHeight, ref: contentRef } = useResizeObserver({ box: 'border-box' })
 
     return (
         <div className="LemonCollapsePanel" aria-expanded={isExpanded}>
             <LemonButton
-                onClick={() => onChange(!isExpanded)}
+                onClick={() => {
+                    onHeaderClick && onHeaderClick()
+                    onChange(!isExpanded)
+                }}
                 icon={isExpanded ? <IconCollapse /> : <IconExpand />}
                 className="LemonCollapsePanel__header"
                 {...(dataAttr ? { 'data-attr': dataAttr } : {})}

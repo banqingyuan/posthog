@@ -1,6 +1,7 @@
 import json
-from typing import Any, Literal, Optional, cast
 from collections.abc import Mapping
+from contextlib import contextmanager
+from typing import Any, Literal, Optional, cast
 
 import pytest
 from django.test import override_settings
@@ -24,6 +25,21 @@ from posthog.schema import (
     PropertyGroupsMode,
 )
 from posthog.test.base import BaseTest, _create_event, cleanup_materialized_columns
+
+
+@contextmanager
+def materialized(table, property):
+    """Materialize a property within the managed block, removing it on exit."""
+    try:
+        from ee.clickhouse.materialized_columns.analyze import materialize
+    except ModuleNotFoundError as e:
+        pytest.xfail(str(e))
+
+    try:
+        materialize(table, property)
+        yield
+    finally:
+        cleanup_materialized_columns()
 
 
 class TestPrinter(BaseTest):
@@ -97,6 +113,141 @@ class TestPrinter(BaseTest):
         self.assertEqual(
             repsponse, f"SELECT\n    plus(1, 2),\n    3\nFROM\n    events\nLIMIT {MAX_SELECT_RETURNED_ROWS}"
         )
+
+    def test_intersect(self):
+        expr = parse_select("""select 1 as id intersect select 2 as id""")
+        response = to_printed_hogql(expr, self.team)
+        self.assertEqual(
+            response,
+            f"SELECT\n    1 AS id\nLIMIT 50000\nINTERSECT\nSELECT\n    2 AS id\nLIMIT {MAX_SELECT_RETURNED_ROWS}",
+        )
+
+    def test_except(self):
+        expr = parse_select("""select 1 as id except select 2 as id""")
+        response = to_printed_hogql(expr, self.team)
+        self.assertEqual(
+            response,
+            f"SELECT\n    1 AS id\nLIMIT 50000\nEXCEPT\nSELECT\n    2 AS id\nLIMIT {MAX_SELECT_RETURNED_ROWS}",
+        )
+
+    # these share the same priority, should stay in order
+    def test_except_and_union(self):
+        expr = parse_select("""select 1 as id except select 2 as id union all select 3 as id""")
+        response = to_printed_hogql(expr, self.team)
+        self.assertEqual(
+            response,
+            (
+                "SELECT\n"
+                "    1 AS id\n"
+                "LIMIT 50000\n"
+                "EXCEPT\n"
+                "SELECT\n"
+                "    2 AS id\n"
+                "LIMIT 50000\n"
+                "UNION ALL\n"
+                "SELECT\n"
+                "    3 AS id\n"
+                "LIMIT 50000"
+            ),
+        )
+
+    def test_union_and_except(self):
+        expr = parse_select("""select 1 as id union all select 2 as id except select 3 as id""")
+        response = to_printed_hogql(expr, self.team)
+        self.assertEqual(
+            response,
+            (
+                "SELECT\n"
+                "    1 AS id\n"
+                "LIMIT 50000\n"
+                "UNION ALL\n"
+                "SELECT\n"
+                "    2 AS id\n"
+                "LIMIT 50000\n"
+                "EXCEPT\n"
+                "SELECT\n"
+                "    3 AS id\n"
+                "LIMIT 50000"
+            ),
+        )
+
+    def test_intersect3(self):
+        expr = parse_select("""select 1 as id intersect select 2 as id intersect select 3 as id""")
+        response = to_printed_hogql(expr, self.team)
+        self.assertEqual(
+            response,
+            "SELECT\n"
+            "    1 AS id\n"
+            "LIMIT 50000\n"
+            "INTERSECT\n"
+            "SELECT\n"
+            "    2 AS id\n"
+            "LIMIT 50000\n"
+            "INTERSECT\n"
+            "SELECT\n"
+            "    3 AS id\n"
+            "LIMIT 50000",
+        )
+
+    def test_union3(self):
+        expr = parse_select("""select 1 as id union all select 2 as id union all select 3 as id""")
+        response = to_printed_hogql(expr, self.team)
+        self.assertEqual(
+            response,
+            "SELECT\n"
+            "    1 AS id\n"
+            "LIMIT 50000\n"
+            "UNION ALL\n"
+            "SELECT\n"
+            "    2 AS id\n"
+            "LIMIT 50000\n"
+            "UNION ALL\n"
+            "SELECT\n"
+            "    3 AS id\n"
+            "LIMIT 50000",
+        )
+
+    def test_intersect_and_union_parens(self):
+        expr = parse_select("""select 1 as id intersect (select 2 as id union all select 3 as id)""")
+        response = to_printed_hogql(expr, self.team)
+        self.assertEqual(
+            response,
+            "SELECT\n"
+            "    1 AS id\n"
+            "LIMIT 50000\n"
+            "INTERSECT\n"
+            "(SELECT\n"
+            "    2 AS id\n"
+            "UNION ALL\n"
+            "SELECT\n"
+            "    3 AS id)",
+        )
+
+    # INTERSECT has higher priority than union
+    def test_intersect_and_union(self):
+        expr = parse_select("""select 1 as id union all select 2 as id intersect select 3 as id""")
+        response = to_printed_hogql(expr, self.team)
+        self.assertEqual(
+            response,
+            (
+                "SELECT\n"
+                "    1 AS id\n"
+                "LIMIT 50000\n"
+                "UNION ALL\n"
+                "SELECT\n"
+                "    2 AS id\n"
+                "LIMIT 50000\n"
+                "INTERSECT\n"
+                "SELECT\n"
+                "    3 AS id\n"
+                "LIMIT 50000"
+            ),
+        )
+
+    def test_print_to_string(self):
+        assert str(parse_select("select 1 + 2, 3 from events")) == "sql(SELECT plus(1, 2), 3 FROM events)"
+        assert str(parse_expr("1 + 2")) == "sql(plus(1, 2))"
+        assert str(parse_expr("unknown_field")) == "sql(unknown_field)"
 
     def test_literals(self):
         self.assertEqual(self._expr("1 + 2"), "plus(1, 2)")
@@ -177,7 +328,7 @@ class TestPrinter(BaseTest):
             context = HogQLContext(team_id=self.team.pk)
             self.assertEqual(
                 self._expr("person.properties.bla", context),
-                "events__pdi__person.properties___bla",
+                "events__person.properties___bla",
             )
 
         with override_settings(PERSON_ON_EVENTS_OVERRIDE=True):
@@ -341,25 +492,19 @@ class TestPrinter(BaseTest):
             ),
         )
 
-        cleanup_materialized_columns()
-
         self.assertEqual(
             self._expr("properties['foo']", context),
             "has(events.properties_group_custom, %(hogql_val_0)s) ? events.properties_group_custom[%(hogql_val_0)s] : null",
         )
         self.assertEqual(context.values["hogql_val_0"], "foo")
 
-        try:
-            from ee.clickhouse.materialized_columns.analyze import materialize
-        except ModuleNotFoundError:
-            return
-
-        # Properties that are materialized as columns should take precedence over the values in the group's map column.
-        materialize("events", "foo")
-        self.assertEqual(
-            self._expr("properties['foo']", context),
-            "nullIf(nullIf(events.mat_foo, ''), 'null')",
-        )
+        with materialized("events", "foo"):
+            # Properties that are materialized as columns should take precedence over the values in the group's map
+            # column.
+            self.assertEqual(
+                self._expr("properties['foo']", context),
+                "nullIf(nullIf(events.mat_foo, ''), 'null')",
+            )
 
     def _test_property_group_comparison(
         self,
@@ -393,7 +538,7 @@ class TestPrinter(BaseTest):
         if expected_context_values is not None:
             self.assertDictContainsSubset(expected_context_values, context.values)
 
-        if expected_skip_indexes_used:
+        if expected_skip_indexes_used is not None:
             # The table needs some data to be able get a `EXPLAIN` result that includes index information -- otherwise
             # the query is optimized to read from `NullSource` which doesn't do us much good here...
             for _ in range(10):
@@ -445,6 +590,9 @@ class TestPrinter(BaseTest):
             expected_skip_indexes_used={"properties_group_custom_keys_bf", "properties_group_custom_values_bf"},
         )
 
+        # Don't optimize comparisons to types that require non-trivial type conversions.
+        self._test_property_group_comparison("properties.key = 1", None)
+
         # TODO: We'll want to eventually support this type of expression where the right hand side is a non-``Nullable``
         # value, since this would allow expressions that only reference constant values to also use the appropriate
         # index, but for right now we only want to optimize comparisons to constant values directly for simplicity.
@@ -456,6 +604,30 @@ class TestPrinter(BaseTest):
 
         # ... unless we can distinguish ``Nullable(Nothing)`` from ``Nullable(*)`` -- this _could_ be safely optimized.
         self._test_property_group_comparison("properties.key = lower(NULL)", None)
+
+    def test_property_groups_optimized_boolean_equality_comparisons(self) -> None:
+        PropertyDefinition.objects.create(
+            team=self.team, name="is_boolean", property_type="Boolean", type=PropertyDefinition.Type.EVENT
+        )
+
+        self._test_property_group_comparison(
+            "properties.is_boolean = true",
+            "equals(events.properties_group_custom[%(hogql_val_0)s], 'true')",
+            {"hogql_val_0": "is_boolean"},
+            expected_skip_indexes_used={"properties_group_custom_keys_bf", "properties_group_custom_values_bf"},
+        )
+
+        self._test_property_group_comparison(
+            "properties.is_boolean = false",
+            "equals(events.properties_group_custom[%(hogql_val_0)s], 'false')",
+            {"hogql_val_0": "is_boolean"},
+            expected_skip_indexes_used={"properties_group_custom_keys_bf", "properties_group_custom_values_bf"},
+        )
+
+        # Don't try to optimize not equals comparisons: NULL handling here is tricky, and we wouldn't get any benefit
+        # from using the indexes anyway.
+        self._test_property_group_comparison("properties.is_boolean != true", None, expected_skip_indexes_used=set())
+        self._test_property_group_comparison("properties.is_boolean != false", None, expected_skip_indexes_used=set())
 
     def test_property_groups_optimized_empty_string_equality_comparisons(self) -> None:
         # Keys that don't exist in a map return default values for the type -- in our case empty strings -- so we need
@@ -515,6 +687,25 @@ class TestPrinter(BaseTest):
             {"hogql_val_0": "key"},
         )
 
+    def test_property_groups_optimized_has(self) -> None:
+        self._test_property_group_comparison(
+            "JSONHas(properties, 'key')",
+            "has(events.properties_group_custom, %(hogql_val_0)s)",
+            {"hogql_val_0": "key"},
+            expected_skip_indexes_used={"properties_group_custom_keys_bf"},
+        )
+
+        # TODO: Chained operations/path traversal could be optimized further, but is left alone for now.
+        self._test_property_group_comparison("JSONHas(properties, 'foo', 'bar')", None)
+
+        with materialized("events", "key"):
+            self._test_property_group_comparison(
+                "JSONHas(properties, 'key')",
+                "has(events.properties_group_custom, %(hogql_val_0)s)",
+                {"hogql_val_0": "key"},
+                expected_skip_indexes_used={"properties_group_custom_keys_bf"},
+            )
+
     def test_property_groups_optimized_in_comparisons(self) -> None:
         # The IN operator works much like equality when the right hand side of the expression is all constants. Like
         # equality, it also needs to handle the empty string special case.
@@ -566,6 +757,12 @@ class TestPrinter(BaseTest):
             {"hogql_val_0": "key", "hogql_val_1": ""},
             expected_skip_indexes_used={"properties_group_custom_keys_bf"},
         )
+
+        # Don't optimize comparisons to types that require additional type conversions.
+        self._test_property_group_comparison("properties.key in true", None)
+        self._test_property_group_comparison("properties.key in (true, false)", None)
+        self._test_property_group_comparison("properties.key in 1", None)
+        self._test_property_group_comparison("properties.key in (1, 2, 3)", None)
 
         # Only direct constant comparison is supported for now -- see above.
         self._test_property_group_comparison("properties.key in lower('value')", None)
@@ -692,7 +889,7 @@ class TestPrinter(BaseTest):
         self._assert_expr_error("this makes little sense", "mismatched input 'makes' expecting <EOF>")
         self._assert_expr_error("1;2", "mismatched input ';' expecting <EOF>")
         self._assert_expr_error("b.a(bla)", "You can only call simple functions in HogQL, not expressions")
-        self._assert_expr_error("a -> { print(2) }", "You can not use blocks in HogQL")
+        self._assert_expr_error("a -> { print(2) }", "You can not use expressions inside placeholders")
 
     def test_logic(self):
         self.assertEqual(
@@ -1009,7 +1206,7 @@ class TestPrinter(BaseTest):
         )
         self.assertEqual(
             self._select("SELECT 1 UNION ALL (SELECT 1 UNION ALL SELECT 1) UNION ALL SELECT 1"),
-            f"SELECT 1 LIMIT {MAX_SELECT_RETURNED_ROWS} UNION ALL SELECT 1 LIMIT {MAX_SELECT_RETURNED_ROWS} UNION ALL SELECT 1 LIMIT {MAX_SELECT_RETURNED_ROWS} UNION ALL SELECT 1 LIMIT {MAX_SELECT_RETURNED_ROWS}",
+            f"SELECT 1 LIMIT {MAX_SELECT_RETURNED_ROWS} UNION ALL (SELECT 1 UNION ALL SELECT 1) UNION ALL SELECT 1 LIMIT {MAX_SELECT_RETURNED_ROWS}",
         )
         self.assertEqual(
             self._select("SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 1"),
@@ -1048,16 +1245,20 @@ class TestPrinter(BaseTest):
             )
             self.assertEqual(
                 query,
-                f"SELECT events.event AS event FROM events SAMPLE 2/78 OFFSET 999 INNER JOIN (SELECT "
-                f"argMax(person_distinct_id2.person_id, person_distinct_id2.version) AS person_id, person_distinct_id2.distinct_id "
-                f"AS distinct_id FROM person_distinct_id2 WHERE equals(person_distinct_id2.team_id, {self.team.pk}) GROUP BY "
-                f"person_distinct_id2.distinct_id HAVING ifNull(equals(argMax(person_distinct_id2.is_deleted, person_distinct_id2.version), "
-                f"0), 0) SETTINGS optimize_aggregation_in_order=1) AS events__pdi ON equals(events.distinct_id, events__pdi.distinct_id) JOIN (SELECT person.id AS id FROM person "
-                f"WHERE and(equals(person.team_id, {self.team.pk}), ifNull(in(tuple(person.id, person.version), (SELECT person.id "
-                f"AS id, max(person.version) AS version FROM person WHERE equals(person.team_id, {self.team.pk}) GROUP BY person.id "
-                f"HAVING and(ifNull(equals(argMax(person.is_deleted, person.version), 0), 0), ifNull(less(argMax(toTimeZone(person.created_at, "
-                f"%(hogql_val_0)s), person.version), plus(now64(6, %(hogql_val_1)s), toIntervalDay(1))), 0)))), 0)) SETTINGS optimize_aggregation_in_order=1) "
-                f"AS persons ON equals(persons.id, events__pdi.person_id) WHERE equals(events.team_id, {self.team.pk}) LIMIT {MAX_SELECT_RETURNED_ROWS}",
+                f"SELECT events.event AS event FROM events SAMPLE 2/78 OFFSET 999 LEFT OUTER JOIN (SELECT "
+                "argMax(person_distinct_id_overrides.person_id, person_distinct_id_overrides.version) AS person_id, "
+                "person_distinct_id_overrides.distinct_id AS distinct_id FROM person_distinct_id_overrides WHERE "
+                f"equals(person_distinct_id_overrides.team_id, {self.team.pk}) GROUP BY person_distinct_id_overrides.distinct_id "
+                "HAVING ifNull(equals(argMax(person_distinct_id_overrides.is_deleted, person_distinct_id_overrides.version), 0), 0) "
+                "SETTINGS optimize_aggregation_in_order=1) AS events__override ON equals(events.distinct_id, events__override.distinct_id) "
+                f"JOIN (SELECT person.id AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), "
+                "ifNull(in(tuple(person.id, person.version), (SELECT person.id AS id, max(person.version) AS version "
+                f"FROM person WHERE equals(person.team_id, {self.team.pk}) GROUP BY person.id "
+                "HAVING and(ifNull(equals(argMax(person.is_deleted, person.version), 0), 0), "
+                "ifNull(less(argMax(toTimeZone(person.created_at, %(hogql_val_0)s), person.version), "
+                "plus(now64(6, %(hogql_val_1)s), toIntervalDay(1))), 0)))), 0)) "
+                "SETTINGS optimize_aggregation_in_order=1) AS persons ON equals(persons.id, if(not(empty(events__override.distinct_id)), "
+                f"events__override.person_id, events.person_id)) WHERE equals(events.team_id, {self.team.pk}) LIMIT {MAX_SELECT_RETURNED_ROWS}",
             )
 
             context = HogQLContext(
@@ -1070,16 +1271,20 @@ class TestPrinter(BaseTest):
                     "SELECT events.event FROM events SAMPLE 2/78 OFFSET 999 JOIN persons SAMPLE 0.1 ON persons.id=events.person_id",
                     context,
                 ),
-                f"SELECT events.event AS event FROM events SAMPLE 2/78 OFFSET 999 INNER JOIN (SELECT argMax(person_distinct_id2.person_id, "
-                f"person_distinct_id2.version) AS person_id, person_distinct_id2.distinct_id AS distinct_id FROM person_distinct_id2 "
-                f"WHERE equals(person_distinct_id2.team_id, {self.team.pk}) GROUP BY person_distinct_id2.distinct_id HAVING "
-                f"ifNull(equals(argMax(person_distinct_id2.is_deleted, person_distinct_id2.version), 0), 0) SETTINGS optimize_aggregation_in_order=1) AS events__pdi "
-                f"ON equals(events.distinct_id, events__pdi.distinct_id) JOIN (SELECT person.id AS id FROM person WHERE "
-                f"and(equals(person.team_id, {self.team.pk}), ifNull(in(tuple(person.id, person.version), (SELECT person.id AS id, "
-                f"max(person.version) AS version FROM person WHERE equals(person.team_id, {self.team.pk}) GROUP BY person.id "
-                f"HAVING and(ifNull(equals(argMax(person.is_deleted, person.version), 0), 0), ifNull(less(argMax(toTimeZone(person.created_at, %(hogql_val_0)s), person.version), "
-                f"plus(now64(6, %(hogql_val_1)s), toIntervalDay(1))), 0)))), 0)) SETTINGS optimize_aggregation_in_order=1) "
-                f"AS persons SAMPLE 0.1 ON equals(persons.id, events__pdi.person_id) WHERE equals(events.team_id, {self.team.pk}) LIMIT {MAX_SELECT_RETURNED_ROWS}",
+                f"SELECT events.event AS event FROM events SAMPLE 2/78 OFFSET 999 LEFT OUTER JOIN (SELECT "
+                "argMax(person_distinct_id_overrides.person_id, person_distinct_id_overrides.version) AS person_id, "
+                "person_distinct_id_overrides.distinct_id AS distinct_id FROM person_distinct_id_overrides WHERE "
+                f"equals(person_distinct_id_overrides.team_id, {self.team.pk}) GROUP BY person_distinct_id_overrides.distinct_id "
+                "HAVING ifNull(equals(argMax(person_distinct_id_overrides.is_deleted, person_distinct_id_overrides.version), 0), 0) "
+                "SETTINGS optimize_aggregation_in_order=1) AS events__override ON equals(events.distinct_id, events__override.distinct_id) "
+                f"JOIN (SELECT person.id AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), "
+                "ifNull(in(tuple(person.id, person.version), (SELECT person.id AS id, max(person.version) AS version "
+                f"FROM person WHERE equals(person.team_id, {self.team.pk}) GROUP BY person.id "
+                "HAVING and(ifNull(equals(argMax(person.is_deleted, person.version), 0), 0), "
+                "ifNull(less(argMax(toTimeZone(person.created_at, %(hogql_val_0)s), person.version), "
+                "plus(now64(6, %(hogql_val_1)s), toIntervalDay(1))), 0)))), 0)) "
+                "SETTINGS optimize_aggregation_in_order=1) AS persons SAMPLE 0.1 ON equals(persons.id, if(not(empty(events__override.distinct_id)), "
+                f"events__override.person_id, events.person_id)) WHERE equals(events.team_id, {self.team.pk}) LIMIT {MAX_SELECT_RETURNED_ROWS}",
             )
 
         with override_settings(PERSON_ON_EVENTS_OVERRIDE=True, PERSON_ON_EVENTS_V2_OVERRIDE=False):
@@ -1284,9 +1489,6 @@ class TestPrinter(BaseTest):
         generated_sql_statements1 = self._select(
             "SELECT "
             "start_time = toStartOfMonth(now()), "
-            "now() = now(), "
-            "1 = now(), "
-            "now() = 1, "
             "1 = 1, "
             "click_count = 1, "
             "1 = click_count, "
@@ -1298,9 +1500,6 @@ class TestPrinter(BaseTest):
         generated_sql_statements2 = self._select(
             "SELECT "
             "equals(start_time, toStartOfMonth(now())), "
-            "equals(now(), now()), "
-            "equals(1, now()), "
-            "equals(now(), 1), "
             "equals(1, 1), "
             "equals(click_count, 1), "
             "equals(1, click_count), "
@@ -1316,12 +1515,6 @@ class TestPrinter(BaseTest):
             # (the return of toStartOfMonth() is treated as "potentially nullable" since we yet have full typing support)
             f"ifNull(equals(session_replay_events.start_time, toStartOfMonth(now64(6, %(hogql_val_1)s))), "
             f"isNull(session_replay_events.start_time) and isNull(toStartOfMonth(now64(6, %(hogql_val_1)s)))), "
-            # now() = now() (also two nullable fields)
-            f"ifNull(equals(now64(6, %(hogql_val_2)s), now64(6, %(hogql_val_3)s)), isNull(now64(6, %(hogql_val_2)s)) and isNull(now64(6, %(hogql_val_3)s))), "
-            # 1 = now()
-            f"ifNull(equals(1, now64(6, %(hogql_val_4)s)), 0), "
-            # now() = 1
-            f"ifNull(equals(now64(6, %(hogql_val_5)s), 1), 0), "
             # 1 = 1
             f"1, "
             # click_count = 1
@@ -1340,12 +1533,12 @@ class TestPrinter(BaseTest):
 
     def test_field_nullable_not_equals(self):
         generated_sql1 = self._select(
-            "SELECT start_time != toStartOfMonth(now()), now() != now(), 1 != now(), now() != 1, 1 != 1, "
+            "SELECT start_time != toStartOfMonth(now()), 1 != 1, "
             "click_count != 1, 1 != click_count, click_count != keypress_count, click_count != null, null != click_count "
             "FROM session_replay_events"
         )
         generated_sql2 = self._select(
-            "SELECT notEquals(start_time, toStartOfMonth(now())), notEquals(now(), now()), notEquals(1, now()), notEquals(now(), 1), notEquals(1, 1), "
+            "SELECT notEquals(start_time, toStartOfMonth(now())), notEquals(1, 1), "
             "notEquals(click_count, 1), notEquals(1, click_count), notEquals(click_count, keypress_count), notEquals(click_count, null), notEquals(null, click_count) "
             "FROM session_replay_events"
         )
@@ -1356,12 +1549,6 @@ class TestPrinter(BaseTest):
             # (the return of toStartOfMonth() is treated as "potentially nullable" since we yet have full typing support)
             f"ifNull(notEquals(session_replay_events.start_time, toStartOfMonth(now64(6, %(hogql_val_1)s))), "
             f"isNotNull(session_replay_events.start_time) or isNotNull(toStartOfMonth(now64(6, %(hogql_val_1)s)))), "
-            # now() = now() (also two nullable fields)
-            f"ifNull(notEquals(now64(6, %(hogql_val_2)s), now64(6, %(hogql_val_3)s)), isNotNull(now64(6, %(hogql_val_2)s)) or isNotNull(now64(6, %(hogql_val_3)s))), "
-            # 1 = now()
-            f"ifNull(notEquals(1, now64(6, %(hogql_val_4)s)), 1), "
-            # now() = 1
-            f"ifNull(notEquals(now64(6, %(hogql_val_5)s), 1), 1), "
             # 1 = 1
             f"0, "
             # click_count = 1
@@ -1400,9 +1587,9 @@ class TestPrinter(BaseTest):
         )
         assert generated_sql_statements1 == (
             f"SELECT "
-            "ifNull(equals(transform(nullIf(nullIf(events.mat_is_boolean, ''), 'null'), %(hogql_val_0)s, %(hogql_val_1)s, NULL), 1), 0), "
-            "ifNull(equals(transform(nullIf(nullIf(events.mat_is_boolean, ''), 'null'), %(hogql_val_2)s, %(hogql_val_3)s, NULL), 0), 0), "
-            "isNull(transform(nullIf(nullIf(events.mat_is_boolean, ''), 'null'), %(hogql_val_4)s, %(hogql_val_5)s, NULL)) "
+            "ifNull(equals(transform(toString(nullIf(nullIf(events.mat_is_boolean, ''), 'null')), %(hogql_val_0)s, %(hogql_val_1)s, NULL), 1), 0), "
+            "ifNull(equals(transform(toString(nullIf(nullIf(events.mat_is_boolean, ''), 'null')), %(hogql_val_2)s, %(hogql_val_3)s, NULL), 0), 0), "
+            "isNull(transform(toString(nullIf(nullIf(events.mat_is_boolean, ''), 'null')), %(hogql_val_4)s, %(hogql_val_5)s, NULL)) "
             f"FROM events WHERE equals(events.team_id, {self.team.pk}) LIMIT {MAX_SELECT_RETURNED_ROWS}"
         )
         assert context.values == {
@@ -1891,10 +2078,7 @@ class TestPrinter(BaseTest):
             dialect="clickhouse",
             settings=HogQLGlobalSettings(max_execution_time=10),
         )
-        assert (
-            f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), ifNull(in(id, tuple(1, 2, 3)), 0))"
-            in printed
-        )
+        assert f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), in(id, tuple(1, 2, 3)))" in printed
 
     def test_dont_inline_persons(self):
         query = parse_select(
@@ -1921,10 +2105,7 @@ class TestPrinter(BaseTest):
             dialect="clickhouse",
             settings=HogQLGlobalSettings(max_execution_time=10),
         )
-        assert (
-            f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), ifNull(in(id, tuple(1, 2, 3)), 0))"
-            in printed
-        )
+        assert f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), in(id, tuple(1, 2, 3)))" in printed
 
     def test_two_joins(self):
         query = parse_select(
@@ -1940,14 +2121,8 @@ class TestPrinter(BaseTest):
             dialect="clickhouse",
             settings=HogQLGlobalSettings(max_execution_time=10),
         )
-        assert (
-            f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), ifNull(in(id, tuple(1, 2, 3)), 0))"
-            in printed
-        )
-        assert (
-            f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), ifNull(in(id, tuple(4, 5, 6)), 0))"
-            in printed
-        )
+        assert f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), in(id, tuple(1, 2, 3)))" in printed
+        assert f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), in(id, tuple(4, 5, 6)))" in printed
 
     def test_two_clauses(self):
         query = parse_select(
@@ -1964,10 +2139,7 @@ class TestPrinter(BaseTest):
             settings=HogQLGlobalSettings(max_execution_time=10),
         )
         assert (
-            f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), ifNull(in(id, tuple(7, 8, 9)), 0), ifNull(in(id, tuple(1, 2, 3)), 0))"
+            f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), in(id, tuple(7, 8, 9)), in(id, tuple(1, 2, 3)))"
             in printed
         )
-        assert (
-            f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), ifNull(in(id, tuple(4, 5, 6)), 0))"
-            in printed
-        )
+        assert f"AS id FROM person WHERE and(equals(person.team_id, {self.team.pk}), in(id, tuple(4, 5, 6)))" in printed

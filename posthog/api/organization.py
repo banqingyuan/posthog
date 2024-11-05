@@ -9,7 +9,8 @@ from rest_framework.request import Request
 
 from posthog import settings
 from posthog.api.routing import TeamAndOrgViewSetMixin
-from posthog.api.shared import TeamBasicSerializer
+from posthog.api.shared import ProjectBasicSerializer, TeamBasicSerializer
+from posthog.auth import PersonalAPIKeyAuthentication
 from posthog.cloud_utils import is_cloud
 from posthog.constants import INTERNAL_BOT_EMAIL_SUFFIX, AvailableFeature
 from posthog.event_usage import report_organization_deleted
@@ -68,6 +69,7 @@ class OrganizationPermissionsWithDelete(OrganizationAdminWritePermissions):
 class OrganizationSerializer(serializers.ModelSerializer, UserPermissionsSerializerMixin):
     membership_level = serializers.SerializerMethodField()
     teams = serializers.SerializerMethodField()
+    projects = serializers.SerializerMethodField()
     metadata = serializers.SerializerMethodField()
     member_count = serializers.SerializerMethodField()
     logo_media_id = serializers.PrimaryKeyRelatedField(
@@ -86,6 +88,7 @@ class OrganizationSerializer(serializers.ModelSerializer, UserPermissionsSeriali
             "membership_level",
             "plugins_access_level",
             "teams",
+            "projects",
             "available_product_features",
             "is_member_join_email_enabled",
             "metadata",
@@ -101,6 +104,7 @@ class OrganizationSerializer(serializers.ModelSerializer, UserPermissionsSeriali
             "membership_level",
             "plugins_access_level",
             "teams",
+            "projects",
             "available_product_features",
             "metadata",
             "customer_id",
@@ -125,6 +129,10 @@ class OrganizationSerializer(serializers.ModelSerializer, UserPermissionsSeriali
     def get_teams(self, instance: Organization) -> list[dict[str, Any]]:
         visible_teams = instance.teams.filter(id__in=self.user_permissions.team_ids_visible_for_user)
         return TeamBasicSerializer(visible_teams, context=self.context, many=True).data  # type: ignore
+
+    def get_projects(self, instance: Organization) -> list[dict[str, Any]]:
+        visible_projects = instance.projects.filter(id__in=self.user_permissions.project_ids_visible_for_user)
+        return ProjectBasicSerializer(visible_projects, context=self.context, many=True).data  # type: ignore
 
     def get_metadata(self, instance: Organization) -> dict[str, Union[str, int, object]]:
         return {
@@ -171,7 +179,12 @@ class OrganizationViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         raise NotImplementedError()
 
     def safely_get_queryset(self, queryset) -> QuerySet:
-        return cast(User, self.request.user).organizations.all()
+        user = cast(User, self.request.user)
+        queryset = user.organizations.all()
+        if isinstance(self.request.successful_authenticator, PersonalAPIKeyAuthentication):
+            if scoped_organizations := self.request.successful_authenticator.personal_api_key.scoped_organizations:
+                queryset = queryset.filter(id__in=scoped_organizations)
+        return queryset
 
     def safely_get_object(self, queryset):
         return self.organization

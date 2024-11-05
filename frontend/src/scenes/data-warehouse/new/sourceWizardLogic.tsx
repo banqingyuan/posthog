@@ -6,6 +6,7 @@ import api from 'lib/api'
 import posthog from 'posthog-js'
 import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { Scene } from 'scenes/sceneTypes'
+import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
 
 import {
@@ -16,6 +17,7 @@ import {
     manualLinkSources,
     ManualLinkSourceType,
     PipelineTab,
+    ProductKey,
     SourceConfig,
     SourceFieldConfig,
 } from '~/types'
@@ -567,6 +569,85 @@ export const SOURCE_DETAILS: Record<ExternalDataSourceType, SourceConfig> = {
         ],
         caption: 'Select an existing Salesforce account to link to PostHog or create a new connection',
     },
+    Vitally: {
+        name: 'Vitally',
+        fields: [
+            {
+                name: 'secret_token',
+                label: 'Secret token',
+                type: 'text',
+                required: true,
+                placeholder: 'sk_live_...',
+            },
+            {
+                type: 'select',
+                name: 'region',
+                label: 'Vitally region',
+                required: true,
+                defaultValue: 'EU',
+                options: [
+                    {
+                        label: 'EU',
+                        value: 'EU',
+                    },
+                    {
+                        label: 'US',
+                        value: 'US',
+                        fields: [
+                            {
+                                name: 'subdomain',
+                                label: 'Vitally subdomain',
+                                type: 'text',
+                                required: true,
+                                placeholder: '',
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+        caption: '',
+    },
+    BigQuery: {
+        name: 'BigQuery',
+        fields: [
+            {
+                type: 'file-upload',
+                name: 'key_file',
+                label: 'Google Cloud JSON key file',
+                fileFormat: '.json',
+                required: true,
+            },
+            {
+                type: 'text',
+                name: 'dataset_id',
+                label: 'Dataset ID',
+                required: true,
+                placeholder: '',
+            },
+        ],
+        caption: '',
+    },
+    Chargebee: {
+        name: 'Chargebee',
+        fields: [
+            {
+                name: 'api_key',
+                label: 'API key',
+                type: 'text',
+                required: true,
+                placeholder: '',
+            },
+            {
+                type: 'text',
+                name: 'site_name',
+                label: 'Site name (subdomain)',
+                required: true,
+                placeholder: '',
+            },
+        ],
+        caption: '',
+    },
 }
 
 export const buildKeaFormDefaultFromSourceDetails = (
@@ -672,6 +753,8 @@ export const sourceWizardLogic = kea<sourceWizardLogicType>([
             ['resetTable', 'createTableSuccess'],
             dataWarehouseSettingsLogic,
             ['loadSources'],
+            teamLogic,
+            ['addProductIntent'],
         ],
     }),
     reducers({
@@ -1070,6 +1153,9 @@ export const sourceWizardLogic = kea<sourceWizardLogicType>([
         setManualLinkingProvider: () => {
             actions.onNext()
         },
+        selectConnector: () => {
+            actions.addProductIntent({ product_type: ProductKey.DATA_WAREHOUSE, intent_context: 'selected connector' })
+        },
     })),
     urlToAction(({ actions }) => ({
         '/data-warehouse/:kind/redirect': ({ kind = '' }, searchParams) => {
@@ -1105,7 +1191,7 @@ export const sourceWizardLogic = kea<sourceWizardLogicType>([
             },
             submit: async (sourceValues) => {
                 if (values.selectedConnector) {
-                    const payload = {
+                    const payload: Record<string, any> = {
                         ...sourceValues,
                         source_type: values.selectedConnector.name,
                     }
@@ -1114,17 +1200,42 @@ export const sourceWizardLogic = kea<sourceWizardLogicType>([
                     try {
                         await api.externalDataSources.source_prefix(payload.source_type, sourceValues.prefix)
 
-                        const payloadKeys = (values.selectedConnector?.fields ?? []).map((n) => n.name)
+                        const payloadKeys = (values.selectedConnector?.fields ?? []).map((n) => ({
+                            name: n.name,
+                            type: n.type,
+                        }))
+
+                        const fieldPayload: Record<string, any> = {
+                            source_type: values.selectedConnector.name,
+                        }
+
+                        for (const { name, type } of payloadKeys) {
+                            if (type === 'file-upload') {
+                                try {
+                                    // Assumes we're loading a JSON file
+                                    const loadedFile: string = await new Promise((resolve, reject) => {
+                                        const fileReader = new FileReader()
+                                        fileReader.onload = (e) => resolve(e.target?.result as string)
+                                        fileReader.onerror = (e) => reject(e)
+                                        fileReader.readAsText(payload['payload'][name][0])
+                                    })
+                                    const jsonConfig = JSON.parse(loadedFile)
+
+                                    fieldPayload[name] = jsonConfig
+                                } catch (e) {
+                                    return lemonToast.error('File is not valid')
+                                }
+                            } else {
+                                fieldPayload[name] = payload['payload'][name]
+                            }
+                        }
 
                         // Only store the keys of the source type we're using
                         actions.updateSource({
                             ...payload,
                             payload: {
                                 source_type: values.selectedConnector.name,
-                                ...payloadKeys.reduce((acc, cur) => {
-                                    acc[cur] = payload['payload'][cur]
-                                    return acc
-                                }, {} as Record<string, any>),
+                                ...fieldPayload,
                             },
                         })
 

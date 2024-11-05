@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import cast
+from unittest.mock import Mock, patch
 
 from posthog.constants import INSIGHT_FUNNELS, FunnelOrderType
 from posthog.hogql_queries.insights.funnels.funnels_query_runner import FunnelsQueryRunner
@@ -38,7 +39,7 @@ def _create_action(**kwargs):
     return action
 
 
-class TestFunnelStrictStepsBreakdown(
+class BaseTestFunnelStrictStepsBreakdown(
     ClickhouseTestMixin,
     funnel_breakdown_test_factory(  # type: ignore
         FunnelOrderType.STRICT,
@@ -47,6 +48,7 @@ class TestFunnelStrictStepsBreakdown(
         _create_person,
     ),
 ):
+    __test__ = False
     maxDiff = None
 
     def test_basic_funnel_default_funnel_days_breakdown_event(self):
@@ -178,26 +180,27 @@ class TestFunnelStrictStepsBreakdown(
         self.assertCountEqual(self._get_actor_ids_at_step(filters, 2, ["Safari"]), [people["person2"].uuid])
 
 
-class TestStrictFunnelGroupBreakdown(
+class BaseTestStrictFunnelGroupBreakdown(
     ClickhouseTestMixin,
     funnel_breakdown_group_test_factory(  # type: ignore
         FunnelOrderType.STRICT,
         ClickhouseFunnelStrictActors,
     ),
 ):
-    pass
+    __test__ = False
 
 
-class TestFunnelStrictStepsConversionTime(
+class BaseTestFunnelStrictStepsConversionTime(
     ClickhouseTestMixin,
     funnel_conversion_time_test_factory(FunnelOrderType.ORDERED, ClickhouseFunnelStrictActors),  # type: ignore
 ):
     maxDiff = None
-    pass
+    __test__ = False
 
 
-class TestFunnelStrictSteps(ClickhouseTestMixin, APIBaseTest):
+class BaseTestFunnelStrictSteps(ClickhouseTestMixin, APIBaseTest):
     maxDiff = None
+    __test__ = False
 
     def _get_actor_ids_at_step(self, filter, funnel_step, breakdown_value=None):
         filter = Filter(data=filter, team=self.team)
@@ -624,3 +627,23 @@ class TestFunnelStrictSteps(ClickhouseTestMixin, APIBaseTest):
             self._get_actor_ids_at_step(filters, 3),
             [person3_stopped_after_insight_view.uuid],
         )
+
+
+@patch("posthoganalytics.feature_enabled", new=Mock(return_value=False))
+class TestFunnelStrictStepsBreakdown(BaseTestFunnelStrictStepsBreakdown):
+    __test__ = True
+
+
+@patch("posthoganalytics.feature_enabled", new=Mock(return_value=False))
+class TestFunnelStrictSteps(BaseTestFunnelStrictSteps):
+    __test__ = True
+
+
+@patch("posthoganalytics.feature_enabled", new=Mock(return_value=False))
+class TestStrictFunnelGroupBreakdown(BaseTestStrictFunnelGroupBreakdown):
+    __test__ = True
+
+
+@patch("posthoganalytics.feature_enabled", new=Mock(return_value=False))
+class TestFunnelStrictStepsConversionTime(BaseTestFunnelStrictStepsConversionTime):
+    __test__ = True

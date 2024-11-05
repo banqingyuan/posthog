@@ -1,10 +1,20 @@
 import { TZLabel } from '@posthog/apps-common'
-import { IconPerson } from '@posthog/icons'
-import { LemonButton, LemonCheckbox, LemonDivider, LemonSegmentedButton, ProfilePicture } from '@posthog/lemon-ui'
+import { IconGear } from '@posthog/icons'
+import {
+    LemonButton,
+    LemonCheckbox,
+    LemonDivider,
+    LemonFileInput,
+    LemonModal,
+    LemonSegmentedButton,
+} from '@posthog/lemon-ui'
 import clsx from 'clsx'
 import { BindLogic, useActions, useValues } from 'kea'
+import { Form } from 'kea-forms'
 import { FeedbackNotice } from 'lib/components/FeedbackNotice'
-import { MemberSelect } from 'lib/components/MemberSelect'
+import { PageHeader } from 'lib/components/PageHeader'
+import { IconUploadFile } from 'lib/lemon-ui/icons'
+import { LemonField } from 'lib/lemon-ui/LemonField'
 import { LemonTableLink } from 'lib/lemon-ui/LemonTable/LemonTableLink'
 import { SceneExport } from 'scenes/sceneTypes'
 import { urls } from 'scenes/urls'
@@ -15,6 +25,7 @@ import { ErrorTrackingGroup } from '~/queries/schema'
 import { QueryContext, QueryContextColumnComponent, QueryContextColumnTitleComponent } from '~/queries/types'
 import { InsightLogicProps } from '~/types'
 
+import { AssigneeSelect } from './AssigneeSelect'
 import { errorTrackingDataNodeLogic } from './errorTrackingDataNodeLogic'
 import ErrorTrackingFilters from './ErrorTrackingFilters'
 import { errorTrackingLogic } from './errorTrackingLogic'
@@ -40,16 +51,19 @@ export function ErrorTrackingScene(): JSX.Element {
                 render: CustomGroupTitleColumn,
             },
             occurrences: { align: 'center' },
+            sessions: { align: 'center' },
+            users: { align: 'center' },
             volume: { renderTitle: CustomVolumeColumnHeader },
-            assignee: { render: AssigneeColumn, align: 'center' },
+            assignee: { render: AssigneeColumn },
         },
         showOpenEditorButton: false,
         insightProps: insightProps,
-        alwaysRefresh: true,
     }
 
     return (
         <BindLogic logic={errorTrackingDataNodeLogic} props={{ query, key: insightVizDataNodeKey(insightProps) }}>
+            <Header />
+            <ConfigurationModal />
             <FeedbackNotice text="Error tracking is in closed alpha. Thanks for taking part! We'd love to hear what you think." />
             <ErrorTrackingFilters.FilterGroup />
             <LemonDivider className="mt-2" />
@@ -107,6 +121,7 @@ const CustomVolumeColumnHeader: QueryContextColumnTitleComponent = ({ columnName
 }
 
 const CustomGroupTitleColumn: QueryContextColumnComponent = (props) => {
+    const { hasGroupActions } = useValues(errorTrackingLogic)
     const { selectedRowIndexes } = useValues(errorTrackingSceneLogic)
     const { setSelectedRowIndexes } = useActions(errorTrackingSceneLogic)
 
@@ -117,15 +132,19 @@ const CustomGroupTitleColumn: QueryContextColumnComponent = (props) => {
 
     return (
         <div className="flex items-start space-x-1.5 group">
-            <LemonCheckbox
-                className={clsx('pt-1 group-hover:visible', !checked && 'invisible')}
-                checked={checked}
-                onChange={(newValue) => {
-                    setSelectedRowIndexes(
-                        newValue ? [...selectedRowIndexes, rowIndex] : selectedRowIndexes.filter((id) => id != rowIndex)
-                    )
-                }}
-            />
+            {hasGroupActions && (
+                <LemonCheckbox
+                    className={clsx('pt-1 group-hover:visible', !checked && 'invisible')}
+                    checked={checked}
+                    onChange={(newValue) => {
+                        setSelectedRowIndexes(
+                            newValue
+                                ? [...selectedRowIndexes, rowIndex]
+                                : selectedRowIndexes.filter((id) => id != rowIndex)
+                        )
+                    }}
+                />
+            )}
             <LemonTableLink
                 title={record.exception_type || 'Unknown Type'}
                 description={
@@ -151,26 +170,71 @@ const AssigneeColumn: QueryContextColumnComponent = (props) => {
     const record = props.record as ErrorTrackingGroup
 
     return (
-        <MemberSelect
-            defaultLabel="Unassigned"
-            value={record.assignee}
-            onChange={(user) => {
-                const assigneeId = user?.id || null
-                assignGroup(props.recordIndex, assigneeId)
-            }}
+        <div className="flex justify-center">
+            <AssigneeSelect
+                assignee={record.assignee}
+                onChange={(assigneeId) => assignGroup(props.recordIndex, assigneeId)}
+            />
+        </div>
+    )
+}
+
+const Header = (): JSX.Element => {
+    const { setIsConfigurationModalOpen } = useActions(errorTrackingSceneLogic)
+
+    return (
+        <PageHeader
+            buttons={
+                <LemonButton type="secondary" icon={<IconGear />} onClick={() => setIsConfigurationModalOpen(true)}>
+                    Configure
+                </LemonButton>
+            }
+        />
+    )
+}
+
+const ConfigurationModal = (): JSX.Element => {
+    const { isConfigurationModalOpen, isUploadSourceMapSubmitting } = useValues(errorTrackingSceneLogic)
+    const { setIsConfigurationModalOpen } = useActions(errorTrackingSceneLogic)
+
+    return (
+        <LemonModal
+            title=""
+            onClose={() => setIsConfigurationModalOpen(false)}
+            isOpen={isConfigurationModalOpen}
+            simple
         >
-            {(user) => (
-                <LemonButton
-                    tooltip={user?.first_name}
-                    icon={
-                        user ? (
-                            <ProfilePicture size="md" user={user} />
-                        ) : (
-                            <IconPerson className="rounded-full border border-dashed border-muted text-muted p-0.5" />
-                        )
-                    }
-                />
-            )}
-        </MemberSelect>
+            <Form logic={errorTrackingSceneLogic} formKey="uploadSourceMap" className="gap-1" enableFormOnSubmit>
+                <LemonModal.Header>
+                    <h3>Upload source map</h3>
+                </LemonModal.Header>
+                <LemonModal.Content className="space-y-2">
+                    <LemonField name="files">
+                        <LemonFileInput
+                            accept="text/plain"
+                            multiple={false}
+                            callToAction={
+                                <div className="flex flex-col items-center justify-center space-y-2 border border-dashed rounded p-4">
+                                    <span className="flex items-center gap-2 font-semibold">
+                                        <IconUploadFile className="text-2xl" /> Add source map
+                                    </span>
+                                    <div>
+                                        Drag and drop your local source map here or click to open the file browser.
+                                    </div>
+                                </div>
+                            }
+                        />
+                    </LemonField>
+                </LemonModal.Content>
+                <LemonModal.Footer>
+                    <LemonButton type="secondary" onClick={() => setIsConfigurationModalOpen(false)}>
+                        Cancel
+                    </LemonButton>
+                    <LemonButton type="primary" status="alt" htmlType="submit" loading={isUploadSourceMapSubmitting}>
+                        Upload
+                    </LemonButton>
+                </LemonModal.Footer>
+            </Form>
+        </LemonModal>
     )
 }

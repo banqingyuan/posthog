@@ -7,7 +7,6 @@ import { ProducerRecord } from 'kafkajs'
 import { DateTime } from 'luxon'
 import { QueryResult } from 'pg'
 
-import { CELERY_DEFAULT_QUEUE } from '../../config/constants'
 import { KAFKA_GROUPS, KAFKA_PERSON_DISTINCT_ID, KAFKA_PLUGIN_LOG_ENTRIES } from '../../config/kafka-topics'
 import {
     Action,
@@ -416,37 +415,6 @@ export class DB {
                 clearTimeout(timeout)
                 await this.redisPool.release(client)
             }
-        })
-    }
-
-    /** Calls Celery task. Works similarly to Task.apply_async in Python. */
-    async celeryApplyAsync(taskName: string, args: any[] = [], kwargs: Record<string, any> = {}): Promise<void> {
-        const taskId = new UUIDT().toString()
-        const deliveryTag = new UUIDT().toString()
-        const body = [args, kwargs, { callbacks: null, errbacks: null, chain: null, chord: null }]
-        /** A base64-encoded JSON representation of the body tuple. */
-        const bodySerialized = Buffer.from(JSON.stringify(body)).toString('base64')
-        await this.redisLPush(CELERY_DEFAULT_QUEUE, {
-            body: bodySerialized,
-            'content-encoding': 'utf-8',
-            'content-type': 'application/json',
-            headers: {
-                lang: 'js',
-                task: taskName,
-                id: taskId,
-                retries: 0,
-                root_id: taskId,
-                parent_id: null,
-                group: null,
-            },
-            properties: {
-                correlation_id: taskId,
-                delivery_mode: 2,
-                delivery_tag: deliveryTag,
-                delivery_info: { exchange: '', routing_key: CELERY_DEFAULT_QUEUE },
-                priority: 0,
-                body_encoding: 'base64',
-            },
         })
     }
 
@@ -1374,14 +1342,18 @@ export class DB {
     }
 
     public async getTeamsInOrganizationsWithRootPluginAccess(): Promise<Team[]> {
-        return (
-            await this.postgres.query(
-                PostgresUse.COMMON_READ,
-                'SELECT * from posthog_team WHERE organization_id = (SELECT id from posthog_organization WHERE plugins_access_level = $1)',
-                [OrganizationPluginsAccessLevel.ROOT],
-                'getTeamsInOrganizationsWithRootPluginAccess'
-            )
-        ).rows as Team[]
+        const selectResult = await this.postgres.query<Team>(
+            PostgresUse.COMMON_READ,
+            'SELECT * from posthog_team WHERE organization_id = (SELECT id from posthog_organization WHERE plugins_access_level = $1)',
+            [OrganizationPluginsAccessLevel.ROOT],
+            'getTeamsInOrganizationsWithRootPluginAccess'
+        )
+        for (const row of selectResult.rows) {
+            // pg returns int8 as a string, since it can be larger than JS's max safe integer,
+            // but this is not a problem for project_id, which is a long long way from that limit.
+            row.project_id = parseInt(row.project_id as unknown as string)
+        }
+        return selectResult.rows
     }
 
     public async addOrUpdatePublicJob(

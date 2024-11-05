@@ -381,6 +381,18 @@ class TestExternalDataSource(APIBaseTest):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(payload["results"]), 2)
 
+    def test_dont_expose_job_inputs(self):
+        self._create_external_data_source()
+
+        response = self.client.get(f"/api/projects/{self.team.pk}/external_data_sources/")
+        payload = response.json()
+        results = payload["results"]
+
+        assert len(results) == 1
+
+        result = results[0]
+        assert result.get("job_inputs") is None
+
     def test_get_external_data_source_with_schema(self):
         source = self._create_external_data_source()
         schema = self._create_external_data_schema(source.pk)
@@ -621,7 +633,7 @@ class TestExternalDataSource(APIBaseTest):
                 }
             ]
 
-            new_team = Team.objects.create(name="new_team", organization=self.team.organization)
+            new_team = Team.objects.create(id=984961485, name="new_team", organization=self.team.organization)
 
             response = self.client.post(
                 f"/api/projects/{new_team.pk}/external_data_sources/database_schema/",
@@ -665,7 +677,7 @@ class TestExternalDataSource(APIBaseTest):
                 }
             ]
 
-            new_team = Team.objects.create(name="new_team", organization=self.team.organization)
+            new_team = Team.objects.create(id=984961486, name="new_team", organization=self.team.organization)
 
             response = self.client.post(
                 f"/api/projects/{new_team.pk}/external_data_sources/database_schema/",

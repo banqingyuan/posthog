@@ -30,6 +30,8 @@ import {
     NodeKind,
     PathsQuery,
     PersonsNode,
+    QuerySchema,
+    QueryStatusResponse,
     RetentionQuery,
     SavedInsightNode,
     SessionAttributionExplorerQuery,
@@ -78,6 +80,7 @@ export function isDataWarehouseNode(node?: Record<string, any> | null): node is 
     return node?.kind === NodeKind.DataWarehouseNode
 }
 
+/** @deprecated `ActorsQuery` is now used instead of `PersonsNode`. */
 export function isPersonsNode(node?: Record<string, any> | null): node is PersonsNode {
     return node?.kind === NodeKind.PersonsNode
 }
@@ -124,6 +127,10 @@ export function isWebOverviewQuery(node?: Record<string, any> | null): node is W
 
 export function isWebStatsTableQuery(node?: Record<string, any> | null): node is WebStatsTableQuery {
     return node?.kind === NodeKind.WebStatsTableQuery
+}
+
+export function isWebExternalClicksQuery(node?: Record<string, any> | null): boolean {
+    return node?.kind === NodeKind.WebExternalClicksTableQuery
 }
 
 export function isWebTopClicksQuery(node?: Record<string, any> | null): node is WebTopClicksQuery {
@@ -198,6 +205,10 @@ export function isQueryForGroup(query: PersonsNode | ActorsQuery): boolean {
         isRetentionQuery(query.source.source) &&
         query.source.source.aggregation_group_type_index !== undefined
     )
+}
+
+export function isAsyncResponse(response: NonNullable<QuerySchema['response']>): response is QueryStatusResponse {
+    return 'query_status' in response && response.query_status
 }
 
 export function isInsightQueryWithSeries(
@@ -286,6 +297,13 @@ export const getShowLegend = (query: InsightQueryNode): boolean | undefined => {
         return query.trendsFilter?.showLegend
     } else if (isLifecycleQuery(query)) {
         return query.lifecycleFilter?.showLegend
+    }
+    return undefined
+}
+
+export const getShowAlertThresholdLines = (query: InsightQueryNode): boolean | undefined => {
+    if (isTrendsQuery(query)) {
+        return query.trendsFilter?.showAlertThresholdLines
     }
     return undefined
 }

@@ -19,7 +19,7 @@ describe('HogFunctionManager', () => {
     beforeEach(async () => {
         hub = await createHub()
         await resetTestDatabase()
-        manager = new HogFunctionManager(hub.postgres, hub)
+        manager = new HogFunctionManager(hub)
 
         const team = await hub.db.fetchTeam(2)
 
@@ -33,7 +33,10 @@ describe('HogFunctionManager', () => {
             await insertIntegration(hub.postgres, teamId1, {
                 kind: 'slack',
                 config: { team: 'foobar' },
-                sensitive_config: { access_token: 'token' },
+                sensitive_config: {
+                    access_token: hub.encryptedFields.encrypt('token'),
+                    not_encrypted: 'not-encrypted',
+                },
             })
         )
 
@@ -52,6 +55,24 @@ describe('HogFunctionManager', () => {
                     },
                     normal: {
                         value: integrations[0].id,
+                    },
+                },
+            })
+        )
+
+        hogFunctions.push(
+            await insertHogFunction(hub.postgres, teamId1, {
+                name: 'Email Provider team 1',
+                type: 'email',
+                inputs_schema: [
+                    {
+                        type: 'email',
+                        key: 'message',
+                    },
+                ],
+                inputs: {
+                    email: {
+                        value: { from: 'me@a.com', to: 'you@b.com', subject: 'subject', html: 'text' },
                     },
                 },
             })
@@ -81,19 +102,21 @@ describe('HogFunctionManager', () => {
     })
 
     afterEach(async () => {
+        await manager.stop()
         await closeHub(hub)
     })
 
     it('returns the hog functions', async () => {
-        let items = manager.getTeamHogFunctions(teamId1)
+        let items = manager.getTeamHogDestinations(teamId1)
 
         expect(items).toEqual([
             {
                 id: hogFunctions[0].id,
                 team_id: teamId1,
                 name: 'Test Hog Function team 1',
+                type: 'destination',
                 enabled: true,
-                bytecode: null,
+                bytecode: {},
                 filters: null,
                 inputs_schema: [
                     {
@@ -106,16 +129,25 @@ describe('HogFunctionManager', () => {
                         value: {
                             access_token: 'token',
                             team: 'foobar',
+                            not_encrypted: 'not-encrypted',
                         },
                     },
                     normal: {
                         value: integrations[0].id,
                     },
                 },
+                encrypted_inputs: null,
                 masking: null,
                 depends_on_integration_ids: new Set([integrations[0].id]),
             },
         ])
+
+        const allFunctions = manager.getTeamHogFunctions(teamId1)
+        expect(allFunctions.length).toEqual(2)
+        expect(allFunctions.map((f) => f.type).sort()).toEqual(['destination', 'email'])
+
+        const emailProvider = manager.getTeamHogEmailProvider(teamId1)
+        expect(emailProvider.type).toEqual('email')
 
         await hub.db.postgres.query(
             PostgresUse.COMMON_WRITE,
@@ -127,7 +159,7 @@ describe('HogFunctionManager', () => {
         // This is normally dispatched by django
         await manager.reloadHogFunctions(teamId1, [hogFunctions[0].id])
 
-        items = manager.getTeamHogFunctions(teamId1)
+        items = manager.getTeamHogDestinations(teamId1)
 
         expect(items).toMatchObject([
             {
@@ -138,7 +170,7 @@ describe('HogFunctionManager', () => {
     })
 
     it('removes disabled functions', async () => {
-        let items = manager.getTeamHogFunctions(teamId1)
+        let items = manager.getTeamHogDestinations(teamId1)
 
         expect(items).toMatchObject([
             {
@@ -156,14 +188,14 @@ describe('HogFunctionManager', () => {
         // This is normally dispatched by django
         await manager.reloadHogFunctions(teamId1, [hogFunctions[0].id])
 
-        items = manager.getTeamHogFunctions(teamId1)
+        items = manager.getTeamHogDestinations(teamId1)
 
         expect(items).toEqual([])
     })
 
     it('enriches integration inputs if found and belonging to the team', () => {
-        const function1Inputs = manager.getTeamHogFunctions(teamId1)[0].inputs
-        const function2Inputs = manager.getTeamHogFunctions(teamId2)[0].inputs
+        const function1Inputs = manager.getTeamHogDestinations(teamId1)[0].inputs
+        const function2Inputs = manager.getTeamHogDestinations(teamId2)[0].inputs
 
         // Only the right team gets the integration inputs enriched
         expect(function1Inputs).toEqual({
@@ -171,6 +203,7 @@ describe('HogFunctionManager', () => {
                 value: {
                     access_token: 'token',
                     team: 'foobar',
+                    not_encrypted: 'not-encrypted',
                 },
             },
             normal: {

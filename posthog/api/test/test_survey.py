@@ -1,21 +1,20 @@
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Any
-from unittest.mock import ANY
+from unittest.mock import ANY, patch
 
 import pytest
 from django.core.cache import cache
 from django.test.client import Client
-
 from freezegun.api import freeze_time
-from posthog.api.survey import nh3_clean_with_allow_list
-from posthog.models.cohort.cohort import Cohort
 from nanoid import generate
 from rest_framework import status
 
+from posthog.api.survey import nh3_clean_with_allow_list
+from posthog.api.test.test_personal_api_keys import PersonalAPIKeysBaseTest
 from posthog.constants import AvailableFeature
-from posthog.models import FeatureFlag, Action
-
+from posthog.models import Action, FeatureFlag, Team
+from posthog.models.cohort.cohort import Cohort
 from posthog.models.feedback.survey import Survey
 from posthog.test.base import (
     APIBaseTest,
@@ -1343,6 +1342,83 @@ class TestSurvey(APIBaseTest):
             ],
         )
 
+    @patch("posthog.api.survey.report_user_action")
+    @freeze_time("2023-05-01 12:00:00")
+    def test_update_survey_dates_calls_report_user_action(self, mock_report_user_action):
+        survey = Survey.objects.create(
+            team=self.team,
+            name="Date Test Survey",
+            type="popover",
+            questions=[{"type": "open", "question": "Test question?"}],
+        )
+
+        start_date = datetime(2023, 5, 2, tzinfo=UTC)
+        end_date = datetime(2023, 5, 10, tzinfo=UTC)
+
+        # set the start date / aka launch survey
+        response = self.client.patch(
+            f"/api/projects/{self.team.id}/surveys/{survey.id}/",
+            data={"start_date": start_date},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        expected_properties = {
+            "name": "Date Test Survey",
+            "id": survey.id,
+            "survey_type": "popover",
+            "question_types": ["open"],
+            "created_at": survey.created_at,
+        }
+
+        mock_report_user_action.assert_called_once_with(
+            self.user,
+            "survey launched",
+            {
+                **expected_properties,
+                "start_date": start_date,
+                "end_date": None,
+            },
+            self.team,
+        )
+        mock_report_user_action.reset_mock()
+
+        # set the end date / aka stop survey
+        response = self.client.patch(
+            f"/api/projects/{self.team.id}/surveys/{survey.id}/",
+            data={"end_date": end_date},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        mock_report_user_action.assert_called_once_with(
+            self.user,
+            "survey stopped",
+            {
+                **expected_properties,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            self.team,
+        )
+        mock_report_user_action.reset_mock()
+
+        # remove the end date / aka resume survey
+        response = self.client.patch(
+            f"/api/projects/{self.team.id}/surveys/{survey.id}/",
+            data={"end_date": None},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        mock_report_user_action.assert_called_once_with(
+            self.user,
+            "survey resumed",
+            {
+                **expected_properties,
+                "start_date": start_date,
+                "end_date": None,
+            },
+            self.team,
+        )
+
     @freeze_time("2023-05-01 12:00:00")
     def test_delete_survey_records_activity(self):
         survey = Survey.objects.create(
@@ -2296,6 +2372,19 @@ class TestSurveysRecurringIterations(APIBaseTest):
         assert len(response_data["iteration_start_dates"]) == 2
         assert response_data["current_iteration"] == 1
 
+    def test_can_create_and_launch_recurring_survey(self):
+        survey = self._create_recurring_survey()
+        response = self.client.patch(
+            f"/api/projects/{self.team.id}/surveys/{survey.id}/",
+            data={
+                "start_date": datetime.now() - timedelta(days=1),
+            },
+        )
+        response_data = response.json()
+        assert response_data["iteration_start_dates"] is not None
+        assert len(response_data["iteration_start_dates"]) == 2
+        assert response_data["current_iteration"] == 1
+
     def test_can_set_internal_targeting_flag(self):
         survey = self._create_recurring_survey()
         response = self.client.patch(
@@ -2418,7 +2507,7 @@ class TestSurveysRecurringIterations(APIBaseTest):
         )
         assert response.status_code == status.HTTP_200_OK
         survey.refresh_from_db()
-        self.assertIsNone(survey.current_iteration)
+        self.assertIsNotNone(survey.current_iteration)
         response = self.client.patch(
             f"/api/projects/{self.team.id}/surveys/{survey.id}/",
             data={
@@ -2498,6 +2587,25 @@ class TestSurveysAPIList(BaseTest, QueryMatchingTest):
             REMOTE_ADDR=ip,
         )
 
+    def test_can_get_survey_config(self):
+        survey_appearance = {
+            "thankYouMessageHeader": "Thanks for your feedback!",
+            "thankYouMessageDescription": "We'll use it to make notebooks better",
+        }
+        self.team.survey_config = {"appearance": survey_appearance}
+
+        self.team.save()
+
+        self.team = Team.objects.get(id=self.team.id)
+
+        self.client.logout()
+        response = self._get_surveys()
+        response_data = response.json()
+        assert response.status_code == status.HTTP_200_OK, response_data
+        assert response.status_code == status.HTTP_200_OK, response_data
+        assert response_data["survey_config"] is not None
+        assert response_data["survey_config"]["appearance"] == survey_appearance
+
     def test_list_surveys_with_actions(self):
         action = Action.objects.create(
             team=self.team,
@@ -2555,6 +2663,7 @@ class TestSurveysAPIList(BaseTest, QueryMatchingTest):
                                         "created_by": None,
                                         "deleted": False,
                                         "is_calculating": False,
+                                        "creation_context": None,
                                         "last_calculated_at": ANY,
                                         "team_id": self.team.id,
                                         "is_action": True,
@@ -2673,6 +2782,41 @@ class TestSurveysAPIList(BaseTest, QueryMatchingTest):
 
             assert surveys[0]["name"] == "Survey 1"
             assert surveys[1]["name"] == "Survey 2"
+
+
+class TestSurveyAPITokens(PersonalAPIKeysBaseTest, APIBaseTest):
+    def setUp(self):
+        super().setUp()
+        self.key.scopes = ["survey:read"]
+        self.key.save()
+
+    @freeze_time("2024-05-01 14:40:09")
+    def test_responses_count_works_with_survey_read(self):
+        survey_counts = {
+            "d63bb580-01af-4819-aae5-edcf7ef2044f": 3,
+            "fe7c4b62-8fc9-401e-b483-e4ff98fd13d5": 6,
+            "daed7689-d498-49fe-936f-e85554351b6c": 100,
+        }
+
+        earliest_survey = Survey.objects.create(team_id=self.team.id)
+        earliest_survey.start_date = datetime.now() - timedelta(days=101)
+        earliest_survey.save()
+
+        for survey_id, count in survey_counts.items():
+            for _ in range(count):
+                _create_event(
+                    event="survey sent",
+                    team=self.team,
+                    distinct_id=self.user.id,
+                    properties={"$survey_id": survey_id},
+                    timestamp=datetime.now() - timedelta(days=count),
+                )
+
+        response = self._do_request(f"/api/projects/{self.team.id}/surveys/responses_count")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        data = response.json()
+        self.assertEqual(data, survey_counts)
 
 
 class TestResponsesCount(ClickhouseTestMixin, APIBaseTest):

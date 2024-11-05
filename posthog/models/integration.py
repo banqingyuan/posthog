@@ -8,11 +8,15 @@ from urllib.parse import urlencode
 
 from django.db import models
 import requests
+from rest_framework.exceptions import ValidationError
 from rest_framework.request import Request
 from slack_sdk import WebClient
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request as GoogleRequest
 
 from django.conf import settings
 from posthog.cache_utils import cache_for
+from posthog.helpers.encrypted_fields import EncryptedJSONField
 from posthog.models.instance_setting import get_instance_settings
 from posthog.models.user import User
 import structlog
@@ -39,17 +43,22 @@ class Integration(models.Model):
         SLACK = "slack"
         SALESFORCE = "salesforce"
         HUBSPOT = "hubspot"
+        GOOGLE_PUBSUB = "google-pubsub"
+        GOOGLE_CLOUD_STORAGE = "google-cloud-storage"
+        GOOGLE_ADS = "google-ads"
 
     team = models.ForeignKey("Team", on_delete=models.CASCADE)
 
     # The integration type identifier
-    kind = models.CharField(max_length=10, choices=IntegrationKind.choices)
+    kind = models.CharField(max_length=20, choices=IntegrationKind.choices)
     # The ID of the integration in the external system
     integration_id = models.TextField(null=True, blank=True)
     # Any config that COULD be passed to the frontend
     config = models.JSONField(default=dict)
-    # Any sensitive config that SHOULD NOT be passed to the frontend
-    sensitive_config = models.JSONField(default=dict)
+    sensitive_config = EncryptedJSONField(
+        default=dict,
+        ignore_decrypt_errors=True,  # allows us to load previously unencrypted data
+    )
 
     errors = models.TextField()
 
@@ -69,6 +78,8 @@ class Integration(models.Model):
         if self.kind in OauthIntegration.supported_kinds:
             oauth_config = OauthIntegration.oauth_config_for_kind(self.kind)
             return dot_get(self.config, oauth_config.name_path, self.integration_id)
+        if self.kind in GoogleCloudIntegration.supported_kinds:
+            return self.integration_id or "unknown ID"
 
         return f"ID: {self.integration_id}"
 
@@ -97,10 +108,11 @@ class OauthConfig:
     name_path: str
     token_info_url: Optional[str] = None
     token_info_config_fields: Optional[list[str]] = None
+    additional_authorize_params: Optional[dict[str, str]] = None
 
 
 class OauthIntegration:
-    supported_kinds = ["slack", "salesforce", "hubspot"]
+    supported_kinds = ["slack", "salesforce", "hubspot", "google-ads"]
     integration: Integration
 
     def __init__(self, integration: Integration) -> None:
@@ -158,6 +170,23 @@ class OauthIntegration:
                 id_path="hub_id",
                 name_path="hub_domain",
             )
+        elif kind == "google-ads":
+            if not settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY or not settings.SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET:
+                raise NotImplementedError("Google Ads app not configured")
+
+            return OauthConfig(
+                authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+                # forces the consent screen, otherwise we won't receive a refresh token
+                additional_authorize_params={"access_type": "offline", "prompt": "consent"},
+                token_info_url="https://openidconnect.googleapis.com/v1/userinfo",
+                token_info_config_fields=["sub", "email"],
+                token_url="https://oauth2.googleapis.com/token",
+                client_id=settings.SOCIAL_AUTH_GOOGLE_OAUTH2_KEY,
+                client_secret=settings.SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET,
+                scope="https://www.googleapis.com/auth/adwords email",
+                id_path="sub",
+                name_path="email",
+            )
 
         raise NotImplementedError(f"Oauth config for kind {kind} not implemented")
 
@@ -176,6 +205,7 @@ class OauthIntegration:
             "redirect_uri": cls.redirect_uri(kind),
             "response_type": "code",
             "state": urlencode({"next": next}),
+            **(oauth_config.additional_authorize_params or {}),
         }
 
         return f"{oauth_config.authorize_url}?{urlencode(query_params)}"
@@ -382,3 +412,83 @@ class SlackIntegration:
         )
 
         return config
+
+
+class GoogleCloudIntegration:
+    supported_kinds = ["google-pubsub", "google-cloud-storage"]
+    integration: Integration
+
+    def __init__(self, integration: Integration) -> None:
+        self.integration = integration
+
+    @classmethod
+    def integration_from_key(
+        cls, kind: str, key_info: dict, team_id: int, created_by: Optional[User] = None
+    ) -> Integration:
+        if kind == "google-pubsub":
+            scope = "https://www.googleapis.com/auth/pubsub"
+        elif kind == "google-cloud-storage":
+            scope = "https://www.googleapis.com/auth/devstorage.read_write"
+        else:
+            raise NotImplementedError(f"Google Cloud integration kind {kind} not implemented")
+
+        try:
+            credentials = service_account.Credentials.from_service_account_info(key_info, scopes=[scope])
+            credentials.refresh(GoogleRequest())
+        except Exception:
+            raise ValidationError(f"Failed to authenticate with provided service account key")
+
+        integration, created = Integration.objects.update_or_create(
+            team_id=team_id,
+            kind=kind,
+            integration_id=credentials.service_account_email,
+            defaults={
+                "config": {
+                    "expires_in": credentials.expiry.timestamp() - int(time.time()),
+                    "refreshed_at": int(time.time()),
+                    "access_token": credentials.token,
+                },
+                "sensitive_config": key_info,
+                "created_by": created_by,
+            },
+        )
+
+        if integration.errors:
+            integration.errors = ""
+            integration.save()
+
+        return integration
+
+    def access_token_expired(self, time_threshold: Optional[timedelta] = None) -> bool:
+        expires_in = self.integration.config.get("expires_in")
+        refreshed_at = self.integration.config.get("refreshed_at")
+        if not expires_in or not refreshed_at:
+            return False
+
+        # To be really safe we refresh if its half way through the expiry
+        time_threshold = time_threshold or timedelta(seconds=expires_in / 2)
+
+        return time.time() > refreshed_at + expires_in - time_threshold.total_seconds()
+
+    def refresh_access_token(self):
+        """
+        Refresh the access token for the integration if necessary
+        """
+        credentials = service_account.Credentials.from_service_account_info(
+            self.integration.sensitive_config, scopes=["https://www.googleapis.com/auth/pubsub"]
+        )
+
+        try:
+            credentials.refresh(GoogleRequest())
+        except Exception:
+            raise ValidationError(f"Failed to authenticate with provided service account key")
+
+        self.integration.config = {
+            "expires_in": credentials.expiry.timestamp() - int(time.time()),
+            "refreshed_at": int(time.time()),
+            "access_token": credentials.token,
+        }
+        self.integration.save()
+        reload_integrations_on_workers(self.integration.team_id, [self.integration.id])
+
+        logger.info(f"Refreshed access token for {self}")

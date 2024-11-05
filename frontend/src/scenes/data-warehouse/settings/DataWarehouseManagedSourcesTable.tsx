@@ -5,6 +5,8 @@ import { More } from 'lib/lemon-ui/LemonButton/More'
 import { LemonTableLink } from 'lib/lemon-ui/LemonTable/LemonTableLink'
 import IconAwsS3 from 'public/services/aws-s3.png'
 import Iconazure from 'public/services/azure.png'
+import IconBigQuery from 'public/services/bigquery.png'
+import IconChargebee from 'public/services/chargebee.png'
 import IconCloudflare from 'public/services/cloudflare.png'
 import IconGoogleCloudStorage from 'public/services/google-cloud-storage.png'
 import IconHubspot from 'public/services/hubspot.png'
@@ -14,6 +16,7 @@ import IconSalesforce from 'public/services/salesforce.png'
 import IconSnowflake from 'public/services/snowflake.png'
 import IconMSSQL from 'public/services/sql-azure.png'
 import IconStripe from 'public/services/stripe.png'
+import IconVitally from 'public/services/vitally.png'
 import IconZendesk from 'public/services/zendesk.png'
 import { urls } from 'scenes/urls'
 
@@ -22,11 +25,12 @@ import { manualLinkSources, PipelineNodeTab, PipelineStage } from '~/types'
 import { SOURCE_DETAILS } from '../new/sourceWizardLogic'
 import { dataWarehouseSettingsLogic } from './dataWarehouseSettingsLogic'
 
-const StatusTagSetting = {
+export const StatusTagSetting: Record<string, 'primary' | 'success' | 'danger'> = {
     Running: 'primary',
     Completed: 'success',
     Error: 'danger',
     Failed: 'danger',
+    'Billing limits': 'danger',
 }
 
 export function DataWarehouseManagedSourcesTable(): JSX.Element {
@@ -188,6 +192,9 @@ export function RenderDataWarehouseSourceIcon({
         azure: Iconazure,
         Salesforce: IconSalesforce,
         MSSQL: IconMSSQL,
+        Vitally: IconVitally,
+        BigQuery: IconBigQuery,
+        Chargebee: IconChargebee,
     }[type]
 
     return (
@@ -202,7 +209,13 @@ export function RenderDataWarehouseSourceIcon({
                 }
             >
                 <Link to={getDataWarehouseSourceUrl(type)}>
-                    <img src={icon} alt={type} height={sizePx} width={sizePx} className="rounded" />
+                    <img
+                        src={icon}
+                        alt={type}
+                        height={sizePx}
+                        width={sizePx}
+                        className="rounded object-contain max-w-none"
+                    />
                 </Link>
             </Tooltip>
         </div>

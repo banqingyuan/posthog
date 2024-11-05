@@ -1,14 +1,15 @@
 import { InspectorListItemPerformance } from 'scenes/session-recordings/apm/performanceEventDataLogic'
+import { SharedListMiniFilter } from 'scenes/session-recordings/player/inspector/miniFiltersLogic'
 import {
     IMAGE_WEB_EXTENSIONS,
     InspectorListBrowserVisibility,
     InspectorListItem,
+    InspectorListItemComment,
     InspectorListItemConsole,
     InspectorListItemDoctor,
     InspectorListItemEvent,
     InspectorListOfflineStatusChange,
 } from 'scenes/session-recordings/player/inspector/playerInspectorLogic'
-import type { SharedListMiniFilter } from 'scenes/session-recordings/player/playerSettingsLogic'
 
 import { SessionRecordingPlayerTab } from '~/types'
 
@@ -85,6 +86,10 @@ function isDoctorEvent(item: InspectorListItem): item is InspectorListItemDoctor
     return item.type === 'doctor'
 }
 
+function isComment(item: InspectorListItem): item is InspectorListItemComment {
+    return item.type === 'comment'
+}
+
 export function filterInspectorListItems({
     allItems,
     tab,
@@ -95,9 +100,11 @@ export function filterInspectorListItems({
 }: {
     allItems: InspectorListItem[]
     tab: SessionRecordingPlayerTab
-    miniFiltersByKey: {
-        [key: string]: SharedListMiniFilter
-    }
+    miniFiltersByKey:
+        | {
+              [key: string]: SharedListMiniFilter
+          }
+        | undefined
     showMatchingEventsFilter: boolean
     showOnlyMatching: boolean
     windowIdFilter: string | null
@@ -107,20 +114,25 @@ export function filterInspectorListItems({
     const shortCircuitExclude = (item: InspectorListItem): boolean =>
         isNetworkEvent(item) && item.data.entry_type === 'paint'
 
+    if (!miniFiltersByKey) {
+        return []
+    }
+
     const inspectorTabFilters: Record<SessionRecordingPlayerTab, (item: InspectorListItem) => boolean> = {
         [SessionRecordingPlayerTab.ALL]: (item: InspectorListItem) => {
             // even in everything mode we don't show doctor events
             const isAllEverything = miniFiltersByKey['all-everything']?.enabled === true && !isDoctorEvent(item)
             const isAllAutomatic =
-                !!miniFiltersByKey['all-automatic']?.enabled &&
-                (isOfflineStatusChange(item) ||
-                    isBrowserVisibilityEvent(item) ||
-                    isNavigationEvent(item) ||
-                    isNetworkError(item) ||
-                    isSlowNetwork(item) ||
-                    isPostHogMobileEvent(item) ||
-                    isPageviewOrScreen(item) ||
-                    isAutocapture(item))
+                (!!miniFiltersByKey['all-automatic']?.enabled &&
+                    (isOfflineStatusChange(item) ||
+                        isBrowserVisibilityEvent(item) ||
+                        isNavigationEvent(item) ||
+                        isNetworkError(item) ||
+                        isSlowNetwork(item) ||
+                        isPostHogMobileEvent(item) ||
+                        isPageviewOrScreen(item) ||
+                        isAutocapture(item))) ||
+                isComment(item)
             const isAllErrors =
                 (!!miniFiltersByKey['all-errors']?.enabled && isNetworkError(item)) ||
                 isConsoleError(item) ||

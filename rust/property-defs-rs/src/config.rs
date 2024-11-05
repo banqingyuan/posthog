@@ -1,5 +1,7 @@
+use std::{num::ParseIntError, str::FromStr};
+
+use common_kafka::config::{ConsumerConfig, KafkaConfig};
 use envconfig::Envconfig;
-use rdkafka::ClientConfig;
 
 #[derive(Envconfig, Clone)]
 pub struct Config {
@@ -11,6 +13,9 @@ pub struct Config {
 
     #[envconfig(nested = true)]
     pub kafka: KafkaConfig,
+
+    #[envconfig(nested = true)]
+    pub consumer: ConsumerConfig,
 
     #[envconfig(default = "10")]
     pub max_concurrent_transactions: usize,
@@ -92,36 +97,72 @@ pub struct Config {
 
     #[envconfig(from = "BIND_PORT", default = "3301")]
     pub port: u16,
+
+    // The set of teams to opt-in or opt-out of property definitions processing (depending on the setting below)
+    #[envconfig(default = "")]
+    pub filtered_teams: TeamList,
+
+    // Whether the team list above is used to filter teams OUT of processing (opt-out) or IN to processing (opt-in).
+    // Defaults to opt-in for now, skipping all updates for teams not in the list. TODO - change this to opt-out
+    // once rollout is complete.
+    #[envconfig(default = "opt_in")]
+    pub filter_mode: TeamFilterMode,
 }
 
-#[derive(Envconfig, Clone)]
-pub struct KafkaConfig {
-    #[envconfig(default = "kafka:9092")]
-    pub kafka_hosts: String,
-    #[envconfig(default = "clickhouse_events_json")]
-    pub event_topic: String,
-    #[envconfig(default = "false")]
-    pub kafka_tls: bool,
-    #[envconfig(default = "false")]
-    pub verify_ssl_certificate: bool,
-    #[envconfig(default = "property-definitions-rs")]
-    pub consumer_group: String,
+#[derive(Clone)]
+pub struct TeamList {
+    pub teams: Vec<i32>,
 }
 
-impl From<&KafkaConfig> for ClientConfig {
-    fn from(config: &KafkaConfig) -> Self {
-        let mut client_config = ClientConfig::new();
-        client_config
-            .set("bootstrap.servers", &config.kafka_hosts)
-            .set("statistics.interval.ms", "10000")
-            .set("group.id", config.consumer_group.clone());
+impl FromStr for TeamList {
+    type Err = ParseIntError;
 
-        if config.kafka_tls {
-            client_config.set("security.protocol", "ssl").set(
-                "enable.ssl.certificate.verification",
-                config.verify_ssl_certificate.to_string(),
-            );
-        };
-        client_config
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut teams = Vec::new();
+        for team in s.trim().split(',') {
+            if team.is_empty() {
+                continue;
+            }
+            teams.push(team.parse()?);
+        }
+        Ok(TeamList { teams })
+    }
+}
+
+#[derive(Clone)]
+pub enum TeamFilterMode {
+    OptIn,
+    OptOut,
+}
+
+impl FromStr for TeamFilterMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().trim() {
+            "opt_in" => Ok(TeamFilterMode::OptIn),
+            "opt_out" => Ok(TeamFilterMode::OptOut),
+            "opt-in" => Ok(TeamFilterMode::OptIn),
+            "opt-out" => Ok(TeamFilterMode::OptOut),
+            "optin" => Ok(TeamFilterMode::OptIn),
+            "optout" => Ok(TeamFilterMode::OptOut),
+            _ => Err(format!("Invalid team filter mode: {}", s)),
+        }
+    }
+}
+
+impl TeamFilterMode {
+    pub fn should_process(&self, list: &[i32], team_id: i32) -> bool {
+        match self {
+            TeamFilterMode::OptIn => list.contains(&team_id),
+            TeamFilterMode::OptOut => !list.contains(&team_id),
+        }
+    }
+}
+
+impl Config {
+    pub fn init_with_defaults() -> Result<Self, envconfig::Error> {
+        ConsumerConfig::set_defaults("property-defs-rs", "clickhouse_events_json");
+        Config::init_from_env()
     }
 }

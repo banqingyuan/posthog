@@ -1,14 +1,14 @@
-from datetime import datetime, timedelta
 import json
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 from django.test.client import Client
 from django.urls import reverse
 from freezegun import freeze_time
 from rest_framework import status
+
 from posthog.api.test.test_organization import create_organization
 from posthog.api.test.test_team import create_team
-
 from posthog.models import Action, Cohort, Dashboard, FeatureFlag, Insight
 from posthog.models.organization import Organization
 from posthog.models.team import Team
@@ -29,7 +29,7 @@ class TestAccessMiddleware(APIBaseTest):
             # not in list
             response = self.client.get("/", REMOTE_ADDR="10.0.0.1")
             self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-            self.assertIn(b"IP is not allowed", response.content)
+            self.assertIn(b"PostHog is not available", response.content)
 
             response = self.client.get("/batch/", REMOTE_ADDR="10.0.0.1")
 
@@ -40,11 +40,11 @@ class TestAccessMiddleware(APIBaseTest):
             # /31 block
             response = self.client.get("/", REMOTE_ADDR="192.168.0.1")
             self.assertNotEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-            self.assertNotIn(b"IP is not allowed", response.content)
+            self.assertNotIn(b"PostHog is not available", response.content)
 
             response = self.client.get("/", REMOTE_ADDR="192.168.0.2")
             self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-            self.assertIn(b"IP is not allowed", response.content)
+            self.assertIn(b"PostHog is not available", response.content)
 
             response = self.client.get("/batch/", REMOTE_ADDR="192.168.0.1")
             self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -55,23 +55,23 @@ class TestAccessMiddleware(APIBaseTest):
             # /24 block
             response = self.client.get("/", REMOTE_ADDR="127.0.0.1")
             self.assertNotEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-            self.assertNotIn(b"IP is not allowed", response.content)
+            self.assertNotIn(b"PostHog is not available", response.content)
 
             response = self.client.get("/", REMOTE_ADDR="127.0.0.100")
             self.assertNotEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-            self.assertNotIn(b"IP is not allowed", response.content)
+            self.assertNotIn(b"PostHog is not available", response.content)
 
             response = self.client.get("/", REMOTE_ADDR="127.0.0.200")
             self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-            self.assertIn(b"IP is not allowed", response.content)
+            self.assertIn(b"PostHog is not available", response.content)
 
             # precise ip
             response = self.client.get("/", REMOTE_ADDR="128.0.0.1")
             self.assertNotEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-            self.assertNotIn(b"IP is not allowed", response.content)
+            self.assertNotIn(b"PostHog is not available", response.content)
 
             response = self.client.get("/", REMOTE_ADDR="128.0.0.2")
-            self.assertIn(b"IP is not allowed", response.content)
+            self.assertIn(b"PostHog is not available", response.content)
 
     def test_trusted_proxies(self):
         with self.settings(
@@ -84,7 +84,7 @@ class TestAccessMiddleware(APIBaseTest):
                     REMOTE_ADDR="10.0.0.1",
                     HTTP_X_FORWARDED_FOR="192.168.0.1,10.0.0.1",
                 )
-                self.assertNotIn(b"IP is not allowed", response.content)
+                self.assertNotIn(b"PostHog is not available", response.content)
 
     def test_attempt_spoofing(self):
         with self.settings(
@@ -97,7 +97,8 @@ class TestAccessMiddleware(APIBaseTest):
                     REMOTE_ADDR="10.0.0.1",
                     HTTP_X_FORWARDED_FOR="192.168.0.1,10.0.0.2",
                 )
-                self.assertIn(b"IP is not allowed", response.content)
+                self.assertEqual(response.status_code, 403)
+                self.assertIn(b"PostHog is not available", response.content)
 
     def test_trust_all_proxies(self):
         with self.settings(
@@ -110,7 +111,24 @@ class TestAccessMiddleware(APIBaseTest):
                     REMOTE_ADDR="10.0.0.1",
                     HTTP_X_FORWARDED_FOR="192.168.0.1,10.0.0.1",
                 )
-                self.assertNotIn(b"IP is not allowed", response.content)
+                self.assertNotIn(b"PostHog is not available", response.content)
+
+    def test_blocked_geoip_regions(self):
+        with self.settings(
+            BLOCKED_GEOIP_REGIONS=["DE"],
+            USE_X_FORWARDED_HOST=True,
+        ):
+            with self.settings(TRUST_ALL_PROXIES=True):
+                response = self.client.get(
+                    "/",
+                    REMOTE_ADDR="45.90.4.87",
+                )
+                self.assertIn(b"PostHog is not available", response.content)
+                response = self.client.get(
+                    "/",
+                    REMOTE_ADDR="28.160.62.192",
+                )
+                self.assertNotIn(b"PostHog is not available", response.content)
 
 
 class TestAutoProjectMiddleware(APIBaseTest):
@@ -124,7 +142,7 @@ class TestAutoProjectMiddleware(APIBaseTest):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
-        cls.base_app_num_queries = 40
+        cls.base_app_num_queries = 47
         # Create another team that the user does have access to
         cls.second_team = create_team(organization=cls.organization, name="Second Life")
 

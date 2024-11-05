@@ -8,6 +8,7 @@ import {
     IconHome,
     IconLive,
     IconLogomark,
+    IconMegaphone,
     IconNotebook,
     IconPeople,
     IconPieChart,
@@ -15,6 +16,7 @@ import {
     IconRewindPlay,
     IconRocket,
     IconServer,
+    IconSparkles,
     IconTestTube,
     IconToggle,
     IconWarning,
@@ -408,7 +410,7 @@ export const navigation3000Logic = kea<navigation3000LogicType>([
                               identifier: Scene.Activity,
                               label: 'Activity',
                               icon: <IconLive />,
-                              to: featureFlags[FEATURE_FLAGS.LIVE_EVENTS] ? urls.activity() : urls.events(),
+                              to: urls.activity(),
                           },
                       ]
                     : [
@@ -419,6 +421,15 @@ export const navigation3000Logic = kea<navigation3000LogicType>([
                               to: urls.products(),
                           },
                       ]
+
+                if (featureFlags[FEATURE_FLAGS.ARTIFICIAL_HOG]) {
+                    sectionOne.splice(1, 0, {
+                        identifier: Scene.Max,
+                        label: 'Max AI',
+                        icon: <IconSparkles />,
+                        to: urls.max(),
+                    })
+                }
 
                 return [
                     sectionOne,
@@ -500,12 +511,29 @@ export const navigation3000Logic = kea<navigation3000LogicType>([
                             icon: <IconServer />,
                             to: isUsingSidebar ? undefined : urls.dataWarehouse(),
                         },
+                        featureFlags[FEATURE_FLAGS.DATA_MODELING] && hasOnboardedAnyProduct
+                            ? {
+                                  identifier: Scene.DataModel,
+                                  label: 'Data model',
+                                  icon: <IconServer />,
+                                  to: isUsingSidebar ? undefined : urls.dataModel(),
+                              }
+                            : null,
                         hasOnboardedAnyProduct
                             ? {
                                   identifier: Scene.Pipeline,
                                   label: 'Data pipeline',
                                   icon: <IconDecisionTree />,
                                   to: urls.pipeline(),
+                              }
+                            : null,
+                        featureFlags[FEATURE_FLAGS.MESSAGING] && hasOnboardedAnyProduct
+                            ? {
+                                  identifier: Scene.MessagingBroadcasts,
+                                  label: 'Messaging',
+                                  icon: <IconMegaphone />,
+                                  to: urls.messagingBroadcasts(),
+                                  tag: 'alpha' as const,
                               }
                             : null,
                     ].filter(isNotNil),

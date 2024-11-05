@@ -12,19 +12,20 @@ import { getPluginServerCapabilities } from '../capabilities'
 import { CdpApi } from '../cdp/cdp-api'
 import {
     CdpCyclotronWorker,
+    CdpCyclotronWorkerFetch,
     CdpFunctionCallbackConsumer,
-    CdpOverflowConsumer,
     CdpProcessedEventsConsumer,
 } from '../cdp/cdp-consumers'
-import { defaultConfig, sessionRecordingConsumerConfig } from '../config/config'
+import { defaultConfig } from '../config/config'
 import { Hub, PluginServerCapabilities, PluginServerService, PluginsServerConfig } from '../types'
 import { closeHub, createHub, createKafkaClient, createKafkaProducerWrapper } from '../utils/db/hub'
 import { PostgresRouter } from '../utils/db/postgres'
+import { createRedisClient } from '../utils/db/redis'
 import { cancelAllScheduledJobs } from '../utils/node-schedule'
 import { posthog } from '../utils/posthog'
 import { PubSub } from '../utils/pubsub'
 import { status } from '../utils/status'
-import { createRedisClient, delay } from '../utils/utils'
+import { delay } from '../utils/utils'
 import { ActionManager } from '../worker/ingestion/action-manager'
 import { ActionMatcher } from '../worker/ingestion/action-matcher'
 import { AppMetrics } from '../worker/ingestion/app-metrics'
@@ -408,9 +409,8 @@ export async function startPluginsServer(
 
         if (capabilities.sessionRecordingBlobIngestion) {
             const hub = serverInstance.hub
-            const recordingConsumerConfig = sessionRecordingConsumerConfig(serverConfig)
             const postgres = hub?.postgres ?? new PostgresRouter(serverConfig)
-            const s3 = hub?.objectStorage ?? getObjectStorage(recordingConsumerConfig)
+            const s3 = hub?.objectStorage ?? getObjectStorage(serverConfig)
 
             if (!s3) {
                 throw new Error("Can't start session recording blob ingestion without object storage")
@@ -429,9 +429,8 @@ export async function startPluginsServer(
 
         if (capabilities.sessionRecordingBlobOverflowIngestion) {
             const hub = serverInstance.hub
-            const recordingConsumerConfig = sessionRecordingConsumerConfig(serverConfig)
             const postgres = hub?.postgres ?? new PostgresRouter(serverConfig)
-            const s3 = hub?.objectStorage ?? getObjectStorage(recordingConsumerConfig)
+            const s3 = hub?.objectStorage ?? getObjectStorage(serverConfig)
 
             if (!s3) {
                 throw new Error("Can't start session recording blob ingestion without object storage")
@@ -463,22 +462,21 @@ export async function startPluginsServer(
             }
         }
 
-        if (capabilities.cdpFunctionOverflow) {
-            const hub = await setupHub()
-            const consumer = new CdpOverflowConsumer(hub)
-            await consumer.start()
-            services.push(consumer.service)
-        }
-
         if (capabilities.cdpCyclotronWorker) {
             const hub = await setupHub()
-            if (hub.CYCLOTRON_DATABASE_URL) {
+
+            if (!hub.CYCLOTRON_DATABASE_URL) {
+                status.error('💥', 'Cyclotron database URL not set.')
+            } else {
                 const worker = new CdpCyclotronWorker(hub)
                 await worker.start()
                 services.push(worker.service)
-            } else {
-                // This is a temporary solution until we *require* Cyclotron to be configured.
-                status.warn('💥', 'CYCLOTRON_DATABASE_URL is not set, not running Cyclotron worker')
+
+                if (process.env.EXPERIMENTAL_CDP_FETCH_WORKER) {
+                    const workerFetch = new CdpCyclotronWorkerFetch(hub)
+                    await workerFetch.start()
+                    services.push(workerFetch.service)
+                }
             }
         }
 

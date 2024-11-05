@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from posthog.models import Team, User
 
 DATERANGE_MAP = {
+    "second": datetime.timedelta(seconds=1),
     "minute": datetime.timedelta(minutes=1),
     "hour": datetime.timedelta(hours=1),
     "day": datetime.timedelta(days=1),
@@ -174,8 +175,14 @@ def relative_date_parse_with_delta_mapping(
     *,
     always_truncate: bool = False,
     now: Optional[datetime.datetime] = None,
+    increase: bool = False,
 ) -> tuple[datetime.datetime, Optional[dict[str, int]], str | None]:
-    """Returns the parsed datetime, along with the period mapping - if the input was a relative datetime string."""
+    """
+    Returns the parsed datetime, along with the period mapping - if the input was a relative datetime string.
+
+    :increase controls whether to add relative delta to the current time or subtract
+        Should later control this using +/- infront of the input regex
+    """
     try:
         try:
             # This supports a few formats, but we primarily care about:
@@ -244,9 +251,13 @@ def relative_date_parse_with_delta_mapping(
             delta_mapping["month"] = 1
             delta_mapping["day"] = 1
         elif match.group("position") == "End":
-            delta_mapping["month"] = 12
             delta_mapping["day"] = 31
-    parsed_dt -= relativedelta(**delta_mapping)  # type: ignore
+
+    if increase:
+        parsed_dt += relativedelta(**delta_mapping)  # type: ignore
+    else:
+        parsed_dt -= relativedelta(**delta_mapping)  # type: ignore
+
     if always_truncate:
         # Truncate to the start of the hour for hour-precision datetimes, to the start of the day for larger intervals
         # TODO: Remove this from this function, this should not be the responsibility of it
@@ -263,8 +274,11 @@ def relative_date_parse(
     *,
     always_truncate: bool = False,
     now: Optional[datetime.datetime] = None,
+    increase: bool = False,
 ) -> datetime.datetime:
-    return relative_date_parse_with_delta_mapping(input, timezone_info, always_truncate=always_truncate, now=now)[0]
+    return relative_date_parse_with_delta_mapping(
+        input, timezone_info, always_truncate=always_truncate, now=now, increase=increase
+    )[0]
 
 
 def get_js_url(request: HttpRequest) -> str:
@@ -283,6 +297,7 @@ def render_template(
     context: Optional[dict] = None,
     *,
     team_for_public_context: Optional["Team"] = None,
+    status_code: Optional[int] = None,
 ) -> HttpResponse:
     """Render Django template.
 
@@ -301,6 +316,8 @@ def render_template(
         context["sentry_dsn"] = sentry_dsn
     if sentry_environment := os.environ.get("SENTRY_ENVIRONMENT"):
         context["sentry_environment"] = sentry_environment
+    if stripe_public_key := os.environ.get("STRIPE_PUBLIC_KEY"):
+        context["stripe_public_key"] = stripe_public_key
 
     context["git_rev"] = get_git_commit_short()  # Include commit in prod for the `console.info()` message
     if settings.DEBUG and not settings.TEST:
@@ -348,12 +365,14 @@ def render_template(
     if not request.GET.get("no-preloaded-app-context"):
         from posthog.api.shared import TeamPublicSerializer
         from posthog.api.team import TeamSerializer
+        from posthog.api.project import ProjectSerializer
         from posthog.api.user import UserSerializer
         from posthog.user_permissions import UserPermissions
         from posthog.views import preflight_check
 
         posthog_app_context = {
             "current_user": None,
+            "current_project": None,
             "current_team": None,
             "preflight": json.loads(preflight_check(request).getvalue()),
             "default_event_name": "$pageview",
@@ -385,6 +404,12 @@ def render_template(
                     many=False,
                 )
                 posthog_app_context["current_team"] = team_serialized.data
+                project_serialized = ProjectSerializer(
+                    user.team.project,
+                    context={"request": request, "user_permissions": user_permissions},
+                    many=False,
+                )
+                posthog_app_context["current_project"] = project_serialized.data
                 posthog_app_context["frontend_apps"] = get_frontend_apps(user.team.pk)
                 posthog_app_context["default_event_name"] = get_default_event_name(user.team)
 
@@ -424,6 +449,8 @@ def render_template(
 
     html = template.render(context, request=request)
     response = HttpResponse(html)
+    if status_code:
+        response.status_code = status_code
     if not request.user.is_anonymous:
         patch_cache_control(response, no_store=True)
     return response
@@ -1050,6 +1077,20 @@ def filters_override_requested_by_client(request: Request) -> Optional[dict]:
             return json.loads(raw_filters)
         except Exception:
             raise serializers.ValidationError({"filters_override": "Invalid JSON passed in filters_override parameter"})
+
+    return None
+
+
+def variables_override_requested_by_client(request: Request) -> Optional[dict[str, dict]]:
+    raw_variables = request.query_params.get("variables_override")
+
+    if raw_variables is not None:
+        try:
+            return json.loads(raw_variables)
+        except Exception:
+            raise serializers.ValidationError(
+                {"variables_override": "Invalid JSON passed in variables_override parameter"}
+            )
 
     return None
 

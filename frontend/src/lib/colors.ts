@@ -1,3 +1,5 @@
+import { captureException } from '@sentry/react'
+
 import { LifecycleToggle } from '~/types'
 
 import { LemonTagType } from './lemon-ui/LemonTag'
@@ -39,7 +41,9 @@ export const tagColors: LemonTagType[] = [
 export function getColorVar(variable: string): string {
     const colorValue = getComputedStyle(document.body).getPropertyValue('--' + variable)
     if (!colorValue) {
-        throw new Error(`Couldn't find color variable --${variable}`)
+        captureException(new Error(`Couldn't find color variable --${variable}`))
+        // Fall back to black or white depending on the theme
+        return document.body.getAttribute('theme') === 'light' ? '#000' : '#fff'
     }
     return colorValue.trim()
 }
@@ -54,6 +58,11 @@ export function getColorVar(variable: string): string {
 export function getSeriesColor(index: number = 0): string {
     const adjustedIndex = index % dataColorVars.length
     return getColorVar(`data-${dataColorVars[adjustedIndex]}`)
+}
+
+/** Returns all color options for series */
+export function getSeriesColorPalette(): string[] {
+    return dataColorVars.map((colorVar) => getColorVar(`data-${colorVar}`))
 }
 
 /** Return the background color for the given series index. */

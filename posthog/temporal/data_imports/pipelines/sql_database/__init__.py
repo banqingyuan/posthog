@@ -4,7 +4,7 @@ from datetime import datetime, date
 from typing import Any, Optional, Union, List, cast  # noqa: UP035
 from collections.abc import Iterable
 from zoneinfo import ZoneInfo
-from sqlalchemy import MetaData, Table
+from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.engine import Engine, CursorResult
 
 import dlt
@@ -15,6 +15,8 @@ from dlt.common.schema.typing import TColumnSchema
 from dlt.sources.credentials import ConnectionStringCredentials
 from urllib.parse import quote
 
+from posthog.settings.utils import get_from_env
+from posthog.utils import str_to_bool
 from posthog.warehouse.types import IncrementalFieldType
 from posthog.warehouse.models.external_data_source import ExternalDataSource
 from sqlalchemy.sql import text
@@ -63,12 +65,23 @@ def sql_source_for_type(
     else:
         incremental = None
 
+    connect_args = []
+
     if source_type == ExternalDataSource.Type.POSTGRES:
         credentials = ConnectionStringCredentials(
             f"postgresql://{user}:{password}@{host}:{port}/{database}?sslmode={sslmode}"
         )
     elif source_type == ExternalDataSource.Type.MYSQL:
-        credentials = ConnectionStringCredentials(f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}")
+        # We have to get DEBUG in temporal workers cos we're not loading Django in the same way as the app
+        is_debug = get_from_env("DEBUG", False, type_cast=str_to_bool)
+        ssl_ca = "/etc/ssl/cert.pem" if is_debug else "/etc/ssl/certs/ca-certificates.crt"
+        credentials = ConnectionStringCredentials(
+            f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?ssl_ca={ssl_ca}&ssl_verify_cert=false"
+        )
+
+        # PlanetScale needs this to be set
+        if host.endswith("psdb.cloud"):
+            connect_args = ["SET workload = 'OLAP';"]
     elif source_type == ExternalDataSource.Type.MSSQL:
         credentials = ConnectionStringCredentials(
             f"mssql+pyodbc://{user}:{password}@{host}:{port}/{database}?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
@@ -77,7 +90,12 @@ def sql_source_for_type(
         raise Exception("Unsupported source_type")
 
     db_source = sql_database(
-        credentials, schema=schema, table_names=table_names, incremental=incremental, team_id=team_id
+        credentials,
+        schema=schema,
+        table_names=table_names,
+        incremental=incremental,
+        team_id=team_id,
+        connect_args=connect_args,
     )
 
     return db_source
@@ -117,6 +135,42 @@ def snowflake_source(
     return db_source
 
 
+def bigquery_source(
+    dataset_id: str,
+    project_id: str,
+    private_key: str,
+    private_key_id: str,
+    client_email: str,
+    token_uri: str,
+    table_name: str,
+    bq_destination_table_id: str,
+    incremental_field: Optional[str] = None,
+    incremental_field_type: Optional[IncrementalFieldType] = None,
+) -> DltSource:
+    if incremental_field is not None and incremental_field_type is not None:
+        incremental: dlt.sources.incremental | None = dlt.sources.incremental(
+            cursor_path=incremental_field, initial_value=incremental_type_to_initial_value(incremental_field_type)
+        )
+    else:
+        incremental = None
+
+    credentials_info = {
+        "type": "service_account",
+        "project_id": project_id,
+        "private_key": private_key,
+        "private_key_id": private_key_id,
+        "client_email": client_email,
+        "token_uri": token_uri,
+    }
+
+    engine = create_engine(
+        f"bigquery://{project_id}/{dataset_id}?create_disposition=CREATE_IF_NEEDED&allowLargeResults=true&destination={bq_destination_table_id}",
+        credentials_info=credentials_info,
+    )
+
+    return sql_database(engine, schema=None, table_names=[table_name], incremental=incremental)
+
+
 # Temp while DLT doesn't support `interval` columns
 def remove_columns(columns_to_drop: list[str], team_id: Optional[int]):
     def internal_remove(doc: dict) -> dict:
@@ -141,6 +195,7 @@ def sql_database(
     table_names: Optional[List[str]] = dlt.config.value,  # noqa: UP006
     incremental: Optional[dlt.sources.incremental] = None,
     team_id: Optional[int] = None,
+    connect_args: Optional[list[str]] = None,
 ) -> Iterable[DltResource]:
     """
     A DLT source which loads data from an SQL database using SQLAlchemy.
@@ -173,28 +228,35 @@ def sql_database(
         # and pass them in here to get empty table materialization
         binary_columns_to_drop = get_binary_columns(engine, schema or "", table.name)
 
-        yield dlt.resource(
-            table_rows,
-            name=table.name,
-            primary_key=get_primary_key(table),
-            merge_key=get_primary_key(table),
-            write_disposition={
-                "disposition": "merge",
-                "strategy": "upsert",
-            }
-            if incremental
-            else "replace",
-            spec=SqlDatabaseTableConfiguration,
-            table_format="delta",
-            columns=get_column_hints(engine, schema or "", table.name),
-        ).add_map(remove_columns(binary_columns_to_drop, team_id))(
-            engine=engine,
-            table=table,
-            incremental=incremental,
+        yield (
+            dlt.resource(
+                table_rows,
+                name=table.name,
+                primary_key=get_primary_key(table),
+                merge_key=get_primary_key(table),
+                write_disposition={
+                    "disposition": "merge",
+                    "strategy": "upsert",
+                }
+                if incremental
+                else "replace",
+                spec=SqlDatabaseTableConfiguration,
+                table_format="delta",
+                columns=get_column_hints(engine, schema or "", table.name),
+            ).add_map(remove_columns(binary_columns_to_drop, team_id))(
+                engine=engine,
+                table=table,
+                incremental=incremental,
+                connect_args=connect_args,
+            )
         )
 
 
 def get_binary_columns(engine: Engine, schema_name: str, table_name: str) -> list[str]:
+    # TODO(@Gilbert09): Add support for querying bigquery here
+    if engine.url.drivername == "bigquery":
+        return []
+
     with engine.connect() as conn:
         execute_result: CursorResult = conn.execute(
             text(
@@ -217,6 +279,10 @@ def get_binary_columns(engine: Engine, schema_name: str, table_name: str) -> lis
 
 
 def get_column_hints(engine: Engine, schema_name: str, table_name: str) -> dict[str, TColumnSchema]:
+    # TODO(@Gilbert09): Add support for querying bigquery here
+    if engine.url.drivername == "bigquery":
+        return {}
+
     with engine.connect() as conn:
         execute_result: CursorResult = conn.execute(
             text(

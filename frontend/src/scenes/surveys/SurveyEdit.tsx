@@ -34,6 +34,7 @@ import {
     LinkSurveyQuestion,
     RatingSurveyQuestion,
     SurveyQuestion,
+    SurveyQuestionType,
     SurveyType,
     SurveyUrlMatchType,
 } from '~/types'
@@ -132,15 +133,7 @@ export default function SurveyEdit(): JSX.Element {
                                                     description="Automatically appears when PostHog JS is installed"
                                                     value={SurveyType.Popover}
                                                 >
-                                                    <div
-                                                        // eslint-disable-next-line react/forbid-dom-props
-                                                        style={{
-                                                            transform: 'scale(.8)',
-                                                            position: 'absolute',
-                                                            top: '-1rem',
-                                                            left: '-1rem',
-                                                        }}
-                                                    >
+                                                    <div className="scale-[0.8] absolute -top-4 -left-4">
                                                         <SurveyAppearancePreview survey={survey} previewPageIndex={0} />
                                                     </div>
                                                 </PresentationTypeCard>
@@ -151,11 +144,7 @@ export default function SurveyEdit(): JSX.Element {
                                                     description="Use the PostHog API to show/hide your survey programmatically"
                                                     value={SurveyType.API}
                                                 >
-                                                    <div
-                                                        className="absolute left-4"
-                                                        // eslint-disable-next-line react/forbid-dom-props
-                                                        style={{ width: 350 }}
-                                                    >
+                                                    <div className="absolute left-4 w-[350px]">
                                                         <SurveyAPIEditor survey={survey} />
                                                     </div>
                                                 </PresentationTypeCard>
@@ -480,6 +469,16 @@ export default function SurveyEdit(): JSX.Element {
                                                                   Feedback button customization
                                                               </div>
                                                               <WidgetCustomization
+                                                                  hasBranchingLogic={hasBranchingLogic}
+                                                                  deleteBranchingLogic={deleteBranchingLogic}
+                                                                  customizeRatingButtons={
+                                                                      survey.questions[0].type ===
+                                                                      SurveyQuestionType.Rating
+                                                                  }
+                                                                  customizePlaceholderText={
+                                                                      survey.questions[0].type ===
+                                                                      SurveyQuestionType.Open
+                                                                  }
                                                                   appearance={value || defaultSurveyAppearance}
                                                                   onAppearanceChange={(appearance) => {
                                                                       onChange(appearance)
@@ -491,7 +490,14 @@ export default function SurveyEdit(): JSX.Element {
                                                       )}
                                                       <Customization
                                                           appearance={value || defaultSurveyAppearance}
-                                                          surveyQuestionItem={survey.questions[0]}
+                                                          hasBranchingLogic={hasBranchingLogic}
+                                                          deleteBranchingLogic={deleteBranchingLogic}
+                                                          customizeRatingButtons={
+                                                              survey.questions[0].type === SurveyQuestionType.Rating
+                                                          }
+                                                          customizePlaceholderText={
+                                                              survey.questions[0].type === SurveyQuestionType.Open
+                                                          }
                                                           onAppearanceChange={(appearance) => {
                                                               onChange(appearance)
                                                           }}
@@ -883,6 +889,9 @@ export default function SurveyEdit(): JSX.Element {
                                                         if (newValue === 'once') {
                                                             setSurveyValue('iteration_count', 0)
                                                             setSurveyValue('iteration_frequency_days', 0)
+                                                        } else if (newValue === 'recurring') {
+                                                            setSurveyValue('iteration_count', 1)
+                                                            setSurveyValue('iteration_frequency_days', 90)
                                                         }
                                                     }}
                                                     options={[
@@ -893,7 +902,7 @@ export default function SurveyEdit(): JSX.Element {
                                                         },
                                                         {
                                                             value: 'recurring',
-                                                            label: 'Repeat on a Schedule',
+                                                            label: 'Repeat on a schedule',
                                                             'data-attr': 'survey-iteration-frequency-days',
                                                             disabledReason: surveysRecurringScheduleDisabledReason,
                                                         },

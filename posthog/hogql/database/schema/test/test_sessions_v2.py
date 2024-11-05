@@ -541,6 +541,88 @@ class TestSessionsV2(ClickhouseTestMixin, APIBaseTest):
         [row1] = response.results or []
         self.assertEqual(row1, ("https://example.com/2",))
 
+    def test_lcp(self):
+        s1 = str(uuid7("2024-10-01"))
+        s2 = str(uuid7("2024-10-02"))
+        s3 = str(uuid7("2024-10-03"))
+        s4 = str(uuid7("2024-10-04"))
+
+        # should be null if there's no $web_vitals_LCP_value
+        _create_event(
+            event="$pageview",
+            team=self.team,
+            distinct_id=s1,
+            properties={"$session_id": s1, "$pathname": "/1"},
+        )
+        # should be able to read the property off the regular "$web_vitals" event
+        _create_event(
+            event="$web_vitals",
+            team=self.team,
+            distinct_id=s2,
+            properties={"$session_id": s2, "$web_vitals_LCP_value": "2.0"},
+        )
+        # should be able to read the property off any event
+        _create_event(
+            event="$pageview",
+            team=self.team,
+            distinct_id=s3,
+            properties={"$session_id": s3, "$web_vitals_LCP_value": "3.0"},
+        )
+        # should take the first value if there's multiple
+        _create_event(
+            event="$web_vitals",
+            team=self.team,
+            distinct_id=s4,
+            properties={"$session_id": s4, "$web_vitals_LCP_value": "4.1"},
+        )
+        _create_event(
+            event="$web_vitals",
+            team=self.team,
+            distinct_id=s4,
+            properties={"$session_id": s4, "$web_vitals_LCP_value": "4.2"},
+        )
+        response = self.__execute(
+            parse_select("select $vitals_lcp from sessions order by session_id"),
+        )
+
+        rows = response.results or []
+        assert rows == [(None,), (2.0,), (3.0,), (4.1,)]
+
+    def test_can_use_v1_and_v2_fields(self):
+        session_id = str(uuid7())
+
+        _create_event(
+            event="$pageview",
+            team=self.team,
+            distinct_id="d1",
+            properties={
+                "$current_url": "https://example.com/pathname",
+                "$pathname": "/pathname",
+                "$session_id": session_id,
+            },
+        )
+
+        response = self.__execute(
+            parse_select(
+                """
+                select
+                    $session_duration,
+                    duration,
+                    $end_current_url,
+                    $exit_current_url,
+                    $end_pathname,
+                    $exit_pathname
+                from sessions
+                where session_id = {session_id}
+                """,
+                placeholders={"session_id": ast.Constant(value=session_id)},
+            ),
+        )
+
+        assert response.results == [
+            (0, 0, "https://example.com/pathname", "https://example.com/pathname", "/pathname", "/pathname")
+        ]
+
 
 class TestGetLazySessionProperties(ClickhouseTestMixin, APIBaseTest):
     def test_all(self):
@@ -569,6 +651,7 @@ class TestGetLazySessionProperties(ClickhouseTestMixin, APIBaseTest):
                 "$screen_count",
                 "$session_duration",
                 "$start_timestamp",
+                "$vitals_lcp",
             },
         )
         self.assertEqual(

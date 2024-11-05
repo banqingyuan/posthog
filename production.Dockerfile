@@ -4,7 +4,7 @@
 # PostHog has sunset support for self-hosted K8s deployments.
 # See: https://posthog.com/blog/sunsetting-helm-support-posthog
 #
-# Note: for PostHog Cloud remember to update ‘Dockerfile.cloud’ as appropriate.
+# Note: for PostHog Cloud remember to update 'Dockerfile.cloud' as appropriate.
 #
 # The stages are used to:
 #
@@ -25,6 +25,10 @@ FROM node:18.19.1-bullseye-slim AS frontend-build
 WORKDIR /code
 SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
 
+# 设置 pnpm store 目录
+ENV PNPM_HOME="/tmp/pnpm-store/v3"
+RUN corepack enable && pnpm config set store-dir $PNPM_HOME
+
 COPY package.json pnpm-lock.yaml ./
 COPY patches/ patches/
 RUN corepack enable && pnpm --version && \
@@ -36,7 +40,7 @@ COPY frontend/ frontend/
 COPY ee/frontend/ ee/frontend/
 COPY ./bin/ ./bin/
 COPY babel.config.js tsconfig.json webpack.config.js tailwind.config.js ./
-RUN pnpm build
+RUN npx update-browserslist-db@latest && pnpm build
 
 #
 # ---------------------------------------------------------
@@ -46,6 +50,8 @@ WORKDIR /code
 COPY ./rust ./rust
 WORKDIR /code/plugin-server
 SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
+
+
 
 # Compile and install Node.js dependencies.
 COPY ./plugin-server/package.json ./plugin-server/pnpm-lock.yaml ./plugin-server/tsconfig.json ./
@@ -58,13 +64,18 @@ RUN apt-get update && \
     "python3" \
     "libssl-dev" \
     "zlib1g-dev" \
+    ca-certificates \
+    curl \
+    gnupg \
     && \
+    curl -fsSL https://deb.debian.org/debian/pool/main/o/openssl/libssl1.1_1.1.1w-0+deb11u1_amd64.deb -o libssl1.1.deb && \
+    dpkg -i libssl1.1.deb && \
+    rm libssl1.1.deb && \
     rm -rf /var/lib/apt/lists/* && \
     corepack enable && \
     mkdir /tmp/pnpm-store && \
     pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store && \
     rm -rf /tmp/pnpm-store
-
 # Build the plugin server.
 #
 # Note: we run the build as a separate action to increase
@@ -72,8 +83,8 @@ RUN apt-get update && \
 COPY ./plugin-server/src/ ./src/
 RUN pnpm build
 
-# As the plugin-server is now built, let’s keep
-# only prod dependencies in the node_module folder
+# As the plugin-server is now built, let's keep
+# only prod dependencies in the node_mod’le folder
 # as we will copy it to the last image.
 RUN corepack enable && \
     mkdir /tmp/pnpm-store && \

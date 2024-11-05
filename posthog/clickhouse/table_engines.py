@@ -55,7 +55,7 @@ class MergeTreeEngine:
         if self.zookeeper_path_key is not None:
             shard_key = f"{self.zookeeper_path_key}_{shard_key}"
 
-        zk_path = f"/clickhouse/tables/{shard_key}/posthog.{self.table}"
+        zk_path = f"/clickhouse/tables/{shard_key}/{settings.CLICKHOUSE_DATABASE}.{self.table}"
         return self.REPLICATED_ENGINE.format(zk_path=zk_path, replica_key=replica_key, **self.kwargs)
 
 
